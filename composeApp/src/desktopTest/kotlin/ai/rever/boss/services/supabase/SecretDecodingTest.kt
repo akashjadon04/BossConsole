@@ -35,6 +35,31 @@ import kotlin.test.assertNull
  * pinning is that the services are wired to it and stay so.
  */
 class SecretDecodingTest {
+    @Test
+    fun `blanked corrupt passwords preserve every row in both listing models`() {
+        val payload =
+            buildJsonArray {
+                for (id in listOf("good", "corrupt")) {
+                    add(
+                        buildJsonObject {
+                            baseSecret(id)
+                            put("password", if (id == "corrupt") "" else "readable")
+                            put("is_owner", true)
+                            put("access_level", "owner")
+                        },
+                    )
+                }
+            }
+
+        val plain = supabaseJson.decodeFromJsonElement<List<SecretEntry>>(payload)
+        val shared = supabaseJson.decodeFromJsonElement<List<SecretEntryWithSharing>>(payload)
+
+        assertEquals(listOf("good", "corrupt"), plain.map { it.id })
+        assertEquals(listOf("readable", ""), plain.map { it.password })
+        assertEquals(listOf("good", "corrupt"), shared.map { it.id })
+        assertEquals(listOf("readable", ""), shared.map { it.password })
+    }
+
     /** The ten columns every secret RPC returned before the organisation work. */
     private fun JsonObjectBuilder.baseSecret(id: String) {
         put("id", id)
