@@ -130,8 +130,8 @@ object RecentBrowserPagesManager {
                 visitCount = 0,
             ),
             RecentBrowserPage(
-                url = "https://github.com/kshivang/BossTerm",
-                title = "BossTerm",
+                url = "https://github.com/akashjadon04/BossConsole",
+                title = "BossConsole",
                 lastVisited = 0L,
                 faviconCacheKey = null,
                 visitCount = 0,

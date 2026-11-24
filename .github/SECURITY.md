@@ -18,7 +18,7 @@ We take security vulnerabilities seriously. If you discover a security issue in 
 ### 📧 How to Report
 
 1. **DO NOT** create a public GitHub issue for security vulnerabilities
-2. **Email us directly**: [security@risalabs.ai](mailto:security@risalabs.ai)
+2. **Email directly**: [akashjadon04@users.noreply.github.com](mailto:akashjadon04@users.noreply.github.com)
 3. **Include in your report**:
    - Description of the vulnerability
    - Steps to reproduce
@@ -136,9 +136,10 @@ If you're contributing to BOSS, please consider these security aspects:
 
 ## 📞 Contact Information
 
-- **Security Email**: [security@risalabs.ai](mailto:security@risalabs.ai)
+- **Security Email**: [akashjadon04@users.noreply.github.com](mailto:akashjadon04@users.noreply.github.com)
 - **General Issues**: [GitHub Issues](https://github.com/akashjadon04/BossConsole/issues)
-- **Website**: [https://www.risalabs.ai](https://www.risalabs.ai)
+- **Website**: [https://github.com/akashjadon04/BossConsole](https://github.com/akashjadon04/BossConsole)
+- **LinkedIn**: [https://www.linkedin.com/in/akashjadon](https://www.linkedin.com/in/akashjadon)
 
 ---
 

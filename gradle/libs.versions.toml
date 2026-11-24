@@ -65,7 +65,7 @@ protobuf-gradle-plugin = "0.10.0"
 graalvm-native-plugin = "1.1.11"
 # IntelliJ PSI for code navigation
 intellij-platform = "243.21565.199"
-# The plugin API contract (risa-labs-inc/boss-plugin-api releases). This pin
+# The plugin API contract (akashjadon04/boss-plugin-api releases). This pin
 # is the single source of truth for which API level the host implements —
 # bump it when consuming a new SDK release. Distribution is store/GitHub-
 # releases ONLY: plugin-platform/plugin-api-core downloads this release's jar and

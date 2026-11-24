@@ -246,11 +246,11 @@ why the status is three-way and the button says Repair. See AGENTS.md.
 
 ## BossTerm Library Integration
 
-BOSS uses [BossTerm](https://github.com/kshivang/BossTerm) for terminal integration.
+BOSS uses [BossTerm](https://github.com/akashjadon04/BossTerm) for terminal integration.
 
 **IMPORTANT**: Do NOT modify the BossTerm repository directly. Instead:
-1. Create a GitHub issue using `gh issue create --repo kshivang/BossTerm`
-2. Or create a PR for the issue using `gh pr create --repo kshivang/BossTerm`
+1. Create a GitHub issue using `gh issue create --repo akashjadon04/BossTerm`
+2. Or create a PR for the issue using `gh pr create --repo akashjadon04/BossTerm`
 
 **BossTerm Features Used**:
 - `TabbedTerminal` - Multi-tab terminal with splits for sidebar panel

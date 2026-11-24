@@ -10,166 +10,166 @@
 # 🌟 Global Owners - Default reviewers for all changes
 # ================================================
 
-* @kshivang
+* @akashjadon04
 
 # ================================================
 # 🔧 Build & Configuration
 # ================================================
 
 # Version management - Critical for releases
-version.properties @kshivang
-gradle/version.gradle @kshivang
+version.properties @akashjadon04
+gradle/version.gradle @akashjadon04
 
 # Build scripts - Platform-specific builds
-build-dmg.sh @kshivang
-build-msi.bat @kshivang
-build-windows-standalone.bat @kshivang
-*.gradle* @kshivang
-gradle.properties @kshivang
-settings.gradle.kts @kshivang
+build-dmg.sh @akashjadon04
+build-msi.bat @akashjadon04
+build-windows-standalone.bat @akashjadon04
+*.gradle* @akashjadon04
+gradle.properties @akashjadon04
+settings.gradle.kts @akashjadon04
 
 # Gradle wrapper - Security critical
-gradle/wrapper/ @kshivang
-gradlew @kshivang
-gradlew.bat @kshivang
+gradle/wrapper/ @akashjadon04
+gradlew @akashjadon04
+gradlew.bat @akashjadon04
 
 # ================================================
 # 🚀 CI/CD & Automation
 # ================================================
 
 # GitHub Actions workflows
-.github/workflows/ @kshivang
-.github/dependabot.yml @kshivang
-.github/CODEOWNERS @kshivang
+.github/workflows/ @akashjadon04
+.github/dependabot.yml @akashjadon04
+.github/CODEOWNERS @akashjadon04
 
 # Release and deployment
-.github/branch-protection-setup.md @kshivang
+.github/branch-protection-setup.md @akashjadon04
 
 # ================================================
 # 🏗️ Core Application Architecture
 # ================================================
 
 # Main application entry points
-composeApp/src/commonMain/kotlin/ai/rever/boss/BossApp.kt @kshivang
-composeApp/src/desktopMain/kotlin/ai/rever/boss/main.kt @kshivang
+composeApp/src/commonMain/kotlin/ai/rever/boss/BossApp.kt @akashjadon04
+composeApp/src/desktopMain/kotlin/ai/rever/boss/main.kt @akashjadon04
 
 # Version and update system - Critical for auto-updates
-composeApp/src/commonMain/kotlin/ai/rever/boss/utils/Version.kt @kshivang
-composeApp/src/commonMain/kotlin/ai/rever/boss/updater/ @kshivang
-composeApp/src/desktopMain/kotlin/ai/rever/boss/updater/ @kshivang
+composeApp/src/commonMain/kotlin/ai/rever/boss/utils/Version.kt @akashjadon04
+composeApp/src/commonMain/kotlin/ai/rever/boss/updater/ @akashjadon04
+composeApp/src/desktopMain/kotlin/ai/rever/boss/updater/ @akashjadon04
 
 # Configuration system
-composeApp/src/commonMain/kotlin/ai/rever/boss/components/configuration/ @kshivang
-composeApp/src/desktopMain/kotlin/ai/rever/boss/components/configuration/ @kshivang
+composeApp/src/commonMain/kotlin/ai/rever/boss/components/configuration/ @akashjadon04
+composeApp/src/desktopMain/kotlin/ai/rever/boss/components/configuration/ @akashjadon04
 
 # ================================================
 # 🖥️ Platform-Specific Code
 # ================================================
 
 # Desktop platform (macOS, Windows, Linux)
-composeApp/src/desktopMain/ @kshivang
+composeApp/src/desktopMain/ @akashjadon04
 
 # Android platform
-composeApp/src/androidMain/ @kshivang
+composeApp/src/androidMain/ @akashjadon04
 
 # iOS platform  
-composeApp/src/iosMain/ @kshivang
-iosApp/ @kshivang
+composeApp/src/iosMain/ @akashjadon04
+iosApp/ @akashjadon04
 
 # Web platform
-composeApp/src/wasmJsMain/ @kshivang
+composeApp/src/wasmJsMain/ @akashjadon04
 
 # ================================================
 # 🔧 Core Components & Systems
 # ================================================
 
 # Window management and UI framework
-composeApp/src/commonMain/kotlin/ai/rever/boss/components/windows/ @kshivang
-composeApp/src/desktopMain/kotlin/ai/rever/boss/components/windows/ @kshivang
+composeApp/src/commonMain/kotlin/ai/rever/boss/components/windows/ @akashjadon04
+composeApp/src/desktopMain/kotlin/ai/rever/boss/components/windows/ @akashjadon04
 
 # Plugin system and panels
-composeApp/src/commonMain/kotlin/ai/rever/boss/components/plugin/ @kshivang
+composeApp/src/commonMain/kotlin/ai/rever/boss/components/plugin/ @akashjadon04
 
 # Terminal integration
-composeApp/src/commonMain/kotlin/ai/rever/boss/components/plugin/panels/bottom/terminal/ @kshivang
-composeApp/src/desktopMain/kotlin/ai/rever/boss/components/plugin/panels/bottom/terminal/ @kshivang
+composeApp/src/commonMain/kotlin/ai/rever/boss/components/plugin/panels/bottom/terminal/ @akashjadon04
+composeApp/src/desktopMain/kotlin/ai/rever/boss/components/plugin/panels/bottom/terminal/ @akashjadon04
 
 # LLM and AI integration
-composeApp/src/commonMain/kotlin/ai/rever/boss/components/plugin/panels/right_top/LLM* @kshivang
-composeApp/src/desktopMain/kotlin/ai/rever/boss/components/plugin/panels/right_top/Desktop*LLM* @kshivang
+composeApp/src/commonMain/kotlin/ai/rever/boss/components/plugin/panels/right_top/LLM* @akashjadon04
+composeApp/src/desktopMain/kotlin/ai/rever/boss/components/plugin/panels/right_top/Desktop*LLM* @akashjadon04
 
 # RPA (Robotic Process Automation)
-composeApp/src/commonMain/kotlin/ai/rever/boss/components/plugin/panels/right_top/Rpa* @kshivang
-composeApp/src/desktopMain/kotlin/ai/rever/boss/components/plugin/panels/right_top/Desktop*Rpa* @kshivang
+composeApp/src/commonMain/kotlin/ai/rever/boss/components/plugin/panels/right_top/Rpa* @akashjadon04
+composeApp/src/desktopMain/kotlin/ai/rever/boss/components/plugin/panels/right_top/Desktop*Rpa* @akashjadon04
 
 # Browser integration (Fluck)
-composeApp/src/commonMain/kotlin/ai/rever/boss/components/plugin/tab_types/fluck/ @kshivang
-composeApp/src/desktopMain/kotlin/ai/rever/boss/components/plugin/tab_types/fluck/ @kshivang
+composeApp/src/commonMain/kotlin/ai/rever/boss/components/plugin/tab_types/fluck/ @akashjadon04
+composeApp/src/desktopMain/kotlin/ai/rever/boss/components/plugin/tab_types/fluck/ @akashjadon04
 
 # ================================================
 # 🛠️ Utilities & System Integration
 # ================================================
 
 # System utilities and platform abstraction
-composeApp/src/commonMain/kotlin/ai/rever/boss/utils/ @kshivang
-composeApp/src/desktopMain/kotlin/ai/rever/boss/utils/ @kshivang
+composeApp/src/commonMain/kotlin/ai/rever/boss/utils/ @akashjadon04
+composeApp/src/desktopMain/kotlin/ai/rever/boss/utils/ @akashjadon04
 
 # Platform-specific integrations
-composeApp/src/commonMain/kotlin/ai/rever/boss/platform/ @kshivang
-composeApp/src/desktopMain/kotlin/ai/rever/boss/platform/ @kshivang
+composeApp/src/commonMain/kotlin/ai/rever/boss/platform/ @akashjadon04
+composeApp/src/desktopMain/kotlin/ai/rever/boss/platform/ @akashjadon04
 
 # ================================================
 # 📚 Documentation & Configuration
 # ================================================
 
 # Main documentation
-README.md @kshivang
-*.md @kshivang
+README.md @akashjadon04
+*.md @akashjadon04
 
 # License and legal
-LICENSE* @kshivang
+LICENSE* @akashjadon04
 
 # Configuration files
-*.properties @kshivang
-local.properties @kshivang
+*.properties @akashjadon04
+local.properties @akashjadon04
 
 # IDE configuration
-.idea/ @kshivang
+.idea/ @akashjadon04
 
 # ================================================
 # 🧪 Testing & Quality
 # ================================================
 
 # Test files
-**/src/*Test*/ @kshivang
-**/src/**/*Test.kt @kshivang
-**/test/ @kshivang
+**/src/*Test*/ @akashjadon04
+**/src/**/*Test.kt @akashjadon04
+**/test/ @akashjadon04
 
 # ================================================
 # 📦 Dependencies & External
 # ================================================
 
 # Dependency management
-gradle/libs.versions.toml @kshivang
+gradle/libs.versions.toml @akashjadon04
 
 # Server component
-server/ @kshivang
+server/ @akashjadon04
 
 # Shared libraries
-shared/ @kshivang
+shared/ @akashjadon04
 
 # ================================================
 # 🔒 Security & Credentials
 # ================================================
 
 # JxBrowser configuration (contains license handling)
-composeApp/src/desktopMain/kotlin/ai/rever/boss/config/ @kshivang
+composeApp/src/desktopMain/kotlin/ai/rever/boss/config/ @akashjadon04
 
 # Resource files with potential sensitive data
-composeApp/src/desktopMain/resources/ @kshivang
+composeApp/src/desktopMain/resources/ @akashjadon04
 
 # Entitlements and signing
-*.entitlements @kshivang
+*.entitlements @akashjadon04
 
 # ================================================
 # 📝 Notes for Code Owners

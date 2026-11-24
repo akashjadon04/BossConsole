@@ -21,7 +21,7 @@
 #   BASE_BRANCH        PR base (default main)
 #   DRY_RUN            when true, decide and report but never push or open a PR
 #   GIT_AUTHOR_NAME    commit identity (default Akash Jadon)
-#   GIT_AUTHOR_EMAIL   commit identity (default enterprise@risalabs.ai)
+#   GIT_AUTHOR_EMAIL   commit identity (default akashjadon04@users.noreply.github.com)
 #   GH_TOKEN           token used for push and PR creation
 #   GITHUB_REPOSITORY  owner/repo
 #   GITHUB_OUTPUT      GitHub Actions output file (stdout outside Actions)
@@ -31,7 +31,7 @@ TOML_FILE="${TOML_FILE:-gradle/libs.versions.toml}"
 BASE_BRANCH="${BASE_BRANCH:-main}"
 DRY_RUN="${DRY_RUN:-false}"
 GIT_AUTHOR_NAME="${GIT_AUTHOR_NAME:-Akash Jadon}"
-GIT_AUTHOR_EMAIL="${GIT_AUTHOR_EMAIL:-enterprise@risalabs.ai}"
+GIT_AUTHOR_EMAIL="${GIT_AUTHOR_EMAIL:-akashjadon04@users.noreply.github.com}"
 REPO="${GITHUB_REPOSITORY:-akashjadon04/BossConsole}"
 OUT="${GITHUB_OUTPUT:-/dev/stdout}"
 

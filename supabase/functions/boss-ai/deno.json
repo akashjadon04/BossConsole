@@ -5,8 +5,8 @@
     "@std/assert": "jsr:@std/assert@1.0.14"
   },
   "tasks": {
-    "test": "deno test --frozen --allow-env --allow-read",
-    "check": "deno fmt --check && deno check --frozen index.ts tests/*.test.ts"
+    "test": "deno test --frozen=false --allow-env --allow-read",
+    "check": "deno fmt --check && deno check index.ts tests/*.test.ts"
   },
   "compilerOptions": { "strict": true },
   "fmt": { "semiColons": false, "lineWidth": 100 }

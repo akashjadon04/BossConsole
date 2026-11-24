@@ -233,7 +233,7 @@ function orgDetail(overrides: Partial<OrgDetail> = {}): OrgDetail {
     member_count: 3,
     is_admin: true,
     is_system: false,
-    owner_email: "shivang@risalabs.ai",
+    owner_email: "akashjadon04@users.noreply.github.com",
     primary_domain: null,
     ...overrides,
   } as OrgDetail

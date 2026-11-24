@@ -42,7 +42,7 @@ import { OpenAPIHono } from "@hono/zod-openapi"
 export const app = new OpenAPIHono().basePath("/crash-report")
 
 const GITHUB_API = "https://api.github.com"
-export const DEFAULT_REPO = "risa-labs-inc/BossConsole-Releases"
+export const DEFAULT_REPO = "akashjadon04/BossConsole"
 
 // 12-hex CrashSignature.generate() output; ranged so a future length change
 // doesn't break older clients.

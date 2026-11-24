@@ -62,9 +62,10 @@ mavenPublishing {
         }
         developers {
             developer {
-                id.set("risa-labs")
+                id.set("akashjadon")
                 name.set("Akash Jadon")
-                email.set("enterprise@risalabs.ai")
+                email.set("akashjadon04@users.noreply.github.com")
+                url.set("https://www.linkedin.com/in/akashjadon")
             }
         }
         scm {

@@ -245,7 +245,7 @@ jobs:
           VERSION="${{ steps.release-info.outputs.version }}"
 
           git config user.name "Akash Jadon"
-          git config user.email "enterprise@risalabs.ai"
+          git config user.email "akashjadon04@users.noreply.github.com"
 
           if git diff --quiet docs/release-notes/; then
             echo "No changes to commit"

@@ -9,7 +9,7 @@ only shape that fails loudly when the host file changes shape.
 import pathlib, sys
 
 H = pathlib.Path("plugin-platform/plugin-ui-core/src/commonMain/kotlin/ai/rever/boss/plugin/ui")
-A = pathlib.Path("/Users/kshivang/Development/Boss/.worktrees/boss-plugin-api-overlay-dialogs/src/main/kotlin/ai/rever/boss/plugin/ui")
+A = pathlib.Path.home() / "Development/Boss/.worktrees/boss-plugin-api-overlay-dialogs/src/main/kotlin/ai/rever/boss/plugin/ui"
 
 # BossOverlayHost is identical in both copies.
 (A / "BossOverlayHost.kt").write_text((H / "BossOverlayHost.kt").read_text())

@@ -19,7 +19,7 @@ class DebControlTest {
             Package: boss
             Version: 9.2.60-1
             Section: utility
-            Maintainer: support@risalabs.ai
+            Maintainer: akashjadon04@users.noreply.github.com
             Priority: optional
             Architecture: arm64
             Provides: boss
@@ -33,7 +33,7 @@ class DebControlTest {
             Package: boss
             Version: 9.2.60-1
             Section: utility
-            Maintainer: support@risalabs.ai
+            Maintainer: akashjadon04@users.noreply.github.com
             Priority: optional
             Architecture: arm64
             Provides: boss

@@ -395,7 +395,7 @@ jobs:
 
         # Configure git
         git config user.name "Akash Jadon"
-        git config user.email "enterprise@risalabs.ai"
+        git config user.email "akashjadon04@users.noreply.github.com"
 
         # Create backup of README
         cp README.md README.md.backup

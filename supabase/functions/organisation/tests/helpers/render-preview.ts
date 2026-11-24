@@ -37,11 +37,11 @@ const org: OrgDetail = {
   visibility: "public",
   join_policy: "request_to_join",
   is_system: false,
-  owner_email: "shivang@risalabs.ai",
+  owner_email: "akash@example.com",
   member_count: 89,
   pending_count: 2,
-  primary_domain: "risalabs.ai",
-  website: "https://risalabs.ai",
+  primary_domain: "example.com",
+  website: "https://example.com",
   is_owner: true,
   is_admin: true,
   can_publish: true,
@@ -51,7 +51,7 @@ const org: OrgDetail = {
 const members: OrgMember[] = [
   {
     user_id: "u1",
-    email: "shivang@risalabs.ai",
+    email: "akash@example.com",
     status: "active",
     joined_at: "2026-01-14T10:00:00Z",
     requested_at: null,
@@ -59,11 +59,11 @@ const members: OrgMember[] = [
     join_source: "seed",
     is_owner: true,
     is_admin: true,
-    roles: ["risa_labs_admin"],
+    roles: ["org_admin"],
   },
   {
     user_id: "u2",
-    email: "aamer@risalabs.ai",
+    email: "dev@example.com",
     status: "active",
     joined_at: "2026-03-02T10:00:00Z",
     requested_at: null,
@@ -71,11 +71,11 @@ const members: OrgMember[] = [
     join_source: "domain",
     is_owner: false,
     is_admin: true,
-    roles: ["risa_labs_admin", "risa_labs_user"],
+    roles: ["org_admin", "org_user"],
   },
   {
     user_id: "u3",
-    email: "someone-with-a-rather-long-address@risalabs.ai",
+    email: "someone-with-a-rather-long-address@example.com",
     status: "active",
     joined_at: "2026-06-21T10:00:00Z",
     requested_at: null,
@@ -121,12 +121,12 @@ const roles: OrgRole[] = [
 const domains: OrgDomain[] = [
   {
     domain_id: "d1",
-    domain: "risalabs.ai",
+    domain: "example.com",
     is_primary: true,
     verified: true,
     verified_at: "2026-02-01T10:00:00Z",
     dns_record_type: "TXT",
-    dns_record_name: "_boss-verify.risalabs.ai",
+    dns_record_name: "_boss-verify.example.com",
     // The real prefix. It was "boss-verify=" here, which the RPC never emits and
     // extractToken would reject - a preview that could not survive a real Verify.
     dns_record_value: "boss-org-verification=6f2a9c31d7b84e05",
@@ -135,12 +135,12 @@ const domains: OrgDomain[] = [
   },
   {
     domain_id: "d2",
-    domain: "risaboss.com",
+    domain: "bossconsole.dev",
     is_primary: false,
     verified: false,
     verified_at: null,
     dns_record_type: "TXT",
-    dns_record_name: "_boss-verify.risaboss.com",
+    dns_record_name: "_boss-verify.bossconsole.dev",
     dns_record_value: "boss-org-verification=1c7e40ab99f3ad2",
     // Unverified rows always carry 0: the RPC does not compute the count for them.
     addable_user_count: 0,
@@ -153,12 +153,12 @@ const invites: OrgInvite[] = [
     token_prefix: "hK3nQ8",
     label: "Platform team",
     role_id: "r2",
-    role_name: "risa_labs_user",
+    role_name: "org_user",
     max_uses: 25,
     uses: 4,
     expires_at: "2026-09-01T10:00:00Z",
     revoked_at: null,
-    created_by_email: "shivang@risalabs.ai",
+    created_by_email: "akash@example.com",
     is_live: true,
   },
   {
@@ -171,7 +171,7 @@ const invites: OrgInvite[] = [
     uses: 12,
     expires_at: "2026-07-01T10:00:00Z",
     revoked_at: "2026-06-20T10:00:00Z",
-    created_by_email: "aamer@risalabs.ai",
+    created_by_email: "dev@example.com",
     is_live: false,
   },
 ]
@@ -282,7 +282,7 @@ const pages: Record<string, string> = {
     org,
     members: Array.from({ length: 60 }, (_, i) => ({
       ...members[i % members.length],
-      email: `member${i + 1}@risalabs.ai`,
+      email: `member${i + 1}@example.com`,
     })),
     roles,
     plugins: Array.from({ length: 40 }, (_, i) => ({

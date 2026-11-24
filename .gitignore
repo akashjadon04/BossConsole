@@ -36,6 +36,7 @@ captures
 *.zip
 *.msi
 *.jar
+!gradle/wrapper/gradle-wrapper.jar
 distribution-final/
 distribution/
 BOSS-Standalone-Windows/

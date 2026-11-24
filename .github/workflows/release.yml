@@ -264,7 +264,7 @@ jobs:
 
           # Configure git
           git config user.name "Akash Jadon"
-          git config user.email "enterprise@risalabs.ai"
+          git config user.email "akashjadon04@users.noreply.github.com"
 
           # Check if there are changes to commit
           if git diff --quiet version.properties; then

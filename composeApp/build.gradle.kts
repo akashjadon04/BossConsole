@@ -1473,7 +1473,7 @@ compose.desktop {
 
             linux {
                 packageName = "boss"
-                debMaintainer = "support@risalabs.ai"
+                debMaintainer = "akashjadon04@users.noreply.github.com"
                 menuGroup = "Development"
                 appCategory = "Utility"
                 shortcut = true
