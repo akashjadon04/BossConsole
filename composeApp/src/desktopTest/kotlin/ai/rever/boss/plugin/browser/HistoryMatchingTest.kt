@@ -36,7 +36,7 @@ class HistoryMatchingTest {
     @Test
     fun `a term matches only at the start of a word`() {
         assertTrue(startsWord("localhost:3000", "loc"))
-        assertTrue(startsWord("akashjadon04/BossConsole", "labs"))
+        assertTrue(startsWord("akash-jadon/BossConsole", "jadon"))
         // The rule that matters: not in the middle of one.
         assertFalse(startsWord("screenshot: password gate, block quota", "loc"))
     }

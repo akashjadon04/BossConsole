@@ -42,7 +42,7 @@ class InlineUrlCompletionTest {
 
         assertEquals(
             "github.com/akashjadon04/BossConsole/pulls",
-            display("github.com/risa", suggestions),
+            display("github.com/akash", suggestions),
         )
     }
 
@@ -260,7 +260,7 @@ class InlineUrlCompletionTest {
 
         assertEquals(
             "https://github.com/akashjadon04/BossConsole/pulls",
-            display("https://github.com/risa", suggestions),
+            display("https://github.com/akash", suggestions),
         )
     }
 
