@@ -1,6 +1,6 @@
 [versions]
 # Updated for Gradle 9.2 compatibility
-agp = "8.13.0"
+agp = "9.5.2"
 android-compileSdk = "35"
 android-minSdk = "24"
 android-targetSdk = "34"
