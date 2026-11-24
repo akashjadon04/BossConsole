@@ -39,8 +39,8 @@ object JxBrowserConfig {
     val defaultUrl: String =
         ConfigLoader.getConfig(
             "jxbrowser.default.url",
-            "https://www.risalabs.ai",
-        ) ?: "https://www.risalabs.ai"
+            "https://github.com/akashjadon04/BossConsole",
+        ) ?: "https://github.com/akashjadon04/BossConsole"
 
     /**
      * How the embedded Chromium hands its frames to Compose. **HARDWARE_ACCELERATED

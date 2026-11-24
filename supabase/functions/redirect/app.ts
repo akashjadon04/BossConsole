@@ -75,8 +75,8 @@ const BRANDS: Record<"boss" | "bossterm", Brand> = {
     name: "BossTerm",
     tagline: "Modern Terminal Emulator",
     appLabel: "BossTerm",
-    footerLine: "BossTerm - by Risa Labs",
-    copyright: "© 2025 Risa Labs. All rights reserved.",
+    footerLine: "BossTerm - by Akash Jadon",
+    copyright: "© 2026 Akash Jadon. All rights reserved.",
   },
 }
 

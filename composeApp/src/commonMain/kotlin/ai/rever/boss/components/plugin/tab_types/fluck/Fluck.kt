@@ -366,7 +366,7 @@ open class FluckTabComponent(
         get() =
             fluckTabInfo?.let {
                 it.currentUrl.ifEmpty { it.url }
-            } ?: "https://www.risalabs.ai"
+            } ?: "https://github.com/akashjadon04/BossConsole"
 
     // Browser state will be initialized lazily in Content() - NOT during construction
     // This prevents blocking the UI thread during window initialization

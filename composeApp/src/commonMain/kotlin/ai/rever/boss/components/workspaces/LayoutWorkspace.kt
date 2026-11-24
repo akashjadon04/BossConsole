@@ -52,7 +52,7 @@ object PredefinedWorkspaces {
      * recent-pages seed: the apex 301s here, so the other spelling would cost a redirect
      * and put the default workspace on a different origin from the browser's own default.
      */
-    const val BROWSER_ONLY_URL = "https://www.risalabs.ai"
+    const val BROWSER_ONLY_URL = "https://github.com/akashjadon04/BossConsole"
 
     val allWorkspaces =
         listOf(

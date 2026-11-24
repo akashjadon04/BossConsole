@@ -120,7 +120,7 @@ class FaviconResolutionTest {
     @Test
     fun `port is not part of the host`() {
         assertEquals("localhost", FaviconHost.of("http://localhost:3000/app"))
-        assertEquals("dev.risalabs.ai", FaviconHost.of("https://dev.risalabs.ai:8443"))
+        assertEquals("dev.example.com", FaviconHost.of("https://dev.example.com:8443"))
     }
 
     /**

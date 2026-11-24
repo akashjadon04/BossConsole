@@ -70,7 +70,7 @@ class WorkspaceDefaultsTest {
         val layout = assertIs<SinglePanel>(workspace.layout, "browser-only must not split the window")
         val tab = layout.panel.tabs.single()
         assertEquals("browser", tab.type)
-        assertEquals("https://www.risalabs.ai", tab.url)
+        assertEquals("https://github.com/akashjadon04/BossConsole", tab.url)
     }
 
     /**

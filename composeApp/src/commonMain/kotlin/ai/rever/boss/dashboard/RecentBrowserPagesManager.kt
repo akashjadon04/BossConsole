@@ -109,7 +109,7 @@ object RecentBrowserPagesManager {
     private val POPULAR_DEV_SITES =
         listOf(
             RecentBrowserPage(
-                url = "https://www.risalabs.ai",
+                url = "https://github.com/akashjadon04/BossConsole",
                 title = "Akash Jadon",
                 lastVisited = 0L,
                 faviconCacheKey = null,
