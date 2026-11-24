@@ -81,7 +81,7 @@ object SystemPluginManifestService {
         listOf(
             SystemPluginManifestEntry(
                 pluginId = "ai.rever.boss.plugin.api",
-                githubRepo = "akashjadon04/boss-plugin-api",
+                githubRepo = "risa-labs-inc/boss-plugin-api",
                 artifactPrefix = "boss-plugin-api",
                 loadPriority = 0,
             ),
@@ -95,31 +95,31 @@ object SystemPluginManifestService {
             ),
             SystemPluginManifestEntry(
                 pluginId = "ai.rever.boss.plugin.dynamic.pluginmanager",
-                githubRepo = "akashjadon04/boss-plugin-plugin-manager",
+                githubRepo = "risa-labs-inc/boss-plugin-plugin-manager",
                 artifactPrefix = "boss-plugin-plugin-manager",
                 loadPriority = 5,
             ),
             SystemPluginManifestEntry(
                 pluginId = "ai.rever.boss.plugin.dynamic.terminaltab",
-                githubRepo = "akashjadon04/boss-plugin-terminal-tab",
+                githubRepo = "risa-labs-inc/boss-plugin-terminal-tab",
                 artifactPrefix = "boss-plugin-terminal-tab",
                 loadPriority = 10,
             ),
             SystemPluginManifestEntry(
                 pluginId = "ai.rever.boss.plugin.dynamic.terminal",
-                githubRepo = "akashjadon04/boss-plugin-terminal",
+                githubRepo = "risa-labs-inc/boss-plugin-terminal",
                 artifactPrefix = "boss-plugin-terminal",
                 loadPriority = 10,
             ),
             SystemPluginManifestEntry(
                 pluginId = "ai.rever.boss.plugin.dynamic.fluckbrowser",
-                githubRepo = "akashjadon04/boss-plugin-fluck-browser",
+                githubRepo = "risa-labs-inc/boss-plugin-fluck-browser",
                 artifactPrefix = "boss-plugin-fluck-browser",
                 loadPriority = 10,
             ),
             SystemPluginManifestEntry(
                 pluginId = "ai.rever.boss.plugin.dynamic.editortab",
-                githubRepo = "akashjadon04/boss-plugin-editor-tab",
+                githubRepo = "risa-labs-inc/boss-plugin-editor-tab",
                 artifactPrefix = "boss-plugin-editor-tab",
                 loadPriority = 10,
                 // 1.4.0 bundles BossEditor privately; older plugin JARs resolve

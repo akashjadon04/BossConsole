@@ -64,7 +64,7 @@ val fetchApiPluginJar =
                 return@doLast
             }
 
-            val url = "https://github.com/akashjadon04/boss-plugin-api/releases/download/v$version/boss-plugin-api-$version.jar"
+            val url = "https://github.com/risa-labs-inc/boss-plugin-api/releases/download/v$version/boss-plugin-api-$version.jar"
             logger.lifecycle("Downloading boss-plugin-api $version from GitHub release…")
             val process =
                 ProcessBuilder("curl", "-fsSL", "-o", targetPath, url)

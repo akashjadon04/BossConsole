@@ -291,7 +291,7 @@ val generateVersionConstants =
 
 // Bundled plugins configuration
 // Downloads the latest boss-plugin-api from GitHub releases
-// Repo: https://github.com/akashjadon04/boss-plugin-api
+// Repo: https://github.com/risa-labs-inc/boss-plugin-api
 
 // Task to download latest bundled plugins from GitHub releases using curl
 val downloadBundledPlugins =
@@ -316,7 +316,7 @@ val downloadBundledPlugins =
         // reported UP-TO-DATE and 64.7 MB shipped anyway.
         val bundledPlugins =
             listOf(
-                "akashjadon04/boss-plugin-api" to "boss-plugin-api",
+                "risa-labs-inc/boss-plugin-api" to "boss-plugin-api",
                 // NOT terminal-tab. At 35.1 MB it is the largest thing left
                 // here, and it is the one plugin whose unbundled behaviour is
                 // not a prediction: the prefix-collision bug deleted it from
@@ -324,8 +324,8 @@ val downloadBundledPlugins =
                 // via ensureSystemPluginsInstalled(), and nobody filed a bug.
                 // Bundling it back would ship 35 MB to restore a state no
                 // user has ever been in.
-                "akashjadon04/boss-plugin-terminal" to "boss-plugin-terminal",
-                "akashjadon04/boss-plugin-fluck-browser" to "boss-plugin-fluck-browser",
+                "risa-labs-inc/boss-plugin-terminal" to "boss-plugin-terminal",
+                "risa-labs-inc/boss-plugin-fluck-browser" to "boss-plugin-fluck-browser",
                 // NOT editor-tab. It is 64.7 MB, a quarter of the whole
                 // download, and bundling buys almost nothing: the host's
                 // ensureSystemPluginsInstalled() fetches it from the
@@ -337,8 +337,8 @@ val downloadBundledPlugins =
                 // seed is frozen at BOSS build time while editor-tab shipped
                 // five releases in two days, so a bundled JAR below the
                 // host's minVersion floor is replaced on startup anyway.
-                "akashjadon04/boss-plugin-plugin-manager" to "boss-plugin-plugin-manager",
-                "akashjadon04/boss-plugin-bookmarks" to "boss-plugin-bookmarks",
+                "risa-labs-inc/boss-plugin-plugin-manager" to "boss-plugin-plugin-manager",
+                "risa-labs-inc/boss-plugin-bookmarks" to "boss-plugin-bookmarks",
             )
 
         inputs.property("bundledPlugins", bundledPlugins.map { (repo, prefix) -> "$repo|$prefix" })
