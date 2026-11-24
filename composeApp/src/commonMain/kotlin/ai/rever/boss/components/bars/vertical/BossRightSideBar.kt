@@ -1,0 +1,146 @@
+package ai.rever.boss.components.bars.vertical
+
+import ai.rever.boss.components.bars.ChromeBar
+import ai.rever.boss.components.bars.rememberBarContextMenuItems
+import ai.rever.boss.components.buttons.ToolLauncherButton
+import ai.rever.boss.components.dividers.SDivider
+import ai.rever.boss.components.dividers.VDivider
+import ai.rever.boss.components.misc.DraggableSidebarSection
+import ai.rever.boss.components.model.BossDraggableComponent
+import ai.rever.boss.components.overlays.contextMenu
+import ai.rever.boss.components.sidebar.SidebarIconRail
+import ai.rever.boss.components.sidebar.SidebarVisibilitySettings
+import ai.rever.boss.components.sidebar.SidebarVisibilitySettingsManager
+import ai.rever.boss.components.sidebar.computeSlotIconLimits
+import ai.rever.boss.layout.BossChrome
+import ai.rever.boss.plugin.api.Panel.Companion.bottom
+import ai.rever.boss.plugin.api.Panel.Companion.left
+import ai.rever.boss.plugin.api.Panel.Companion.right
+import ai.rever.boss.plugin.api.Panel.Companion.top
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clipToBounds
+import androidx.compose.ui.unit.dp
+
+/**
+ * The right icon rail.
+ *
+ * [bottomActions] are host-owned icons pinned below the draggable slots, which is where the focus
+ * mode quick actions go while the top bar is cleared (see `focusQuickActionsPlacement`). Empty by
+ * default and empty most of the time: the bar then renders nothing for them and is unchanged.
+ *
+ * [bottomActionRows] is what the rail *reserves*, and it is a separate number on purpose. Held
+ * steady across a momentary hover-reveal of the top bar, it keeps the plugin slots' icon budget
+ * from changing every time [bottomActions] empties and refills, which in ADAPTIVE mode would pop
+ * icons in and out of the More menu. Defaults to the rendered count, which is right for any caller
+ * whose section does not come and go; see `focusQuickActionsRailRows` for the one whose does.
+ */
+@Composable
+fun BossDraggableComponent.BossRightSideBar(
+    bottomActions: List<@Composable () -> Unit> = emptyList(),
+    bottomActionRows: Int = bottomActions.size,
+    /**
+     * Opens the tools dialog, when this bar is the one carrying the launcher - i.e. when the
+     * LEFT strip is switched off. Null means it is not, and no button is drawn.
+     *
+     * A callback rather than a flag, because the dialog is owned by the window: see
+     * `ToolLauncherButton` for the overlay that made that necessary.
+     */
+    onOpenTools: (() -> Unit)? = null,
+    /** Whether the tools dialog is open, so its launcher reads as selected while it is. */
+    toolsOpen: Boolean = false,
+) {
+    val visibility by SidebarVisibilitySettingsManager.currentSettings.collectAsState()
+    val customizeSlotId = visibility.customizeButtonSlotId
+    val customizeOnThisBar = !SidebarVisibilitySettings.isLeftSide(customizeSlotId)
+
+    VDivider()
+    VerticalBar(
+        width = BossChrome.dimens.stripWidth,
+        // See BossLeftSideBar: attached to the bar so the whole strip answers, while the icons'
+        // own menus still win on the icons themselves.
+        modifier = Modifier.contextMenu(items = rememberBarContextMenuItems(ChromeBar.RIGHT_STRIP)),
+    ) {
+        // BoxWithConstraints gives the rail's full height so adaptive
+        // mode can budget icon rows; recomposes on window resize.
+        BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+            val iconLimits =
+                computeSlotIconLimits(
+                    slots = listOf(right.top.top, right.top.bottom),
+                    settings = visibility,
+                    barHeight = maxHeight,
+                    // The bottom actions are not one of the slots above, so their height has to be
+                    // taken off the budget by hand or a full rail spends it all on plugin icons.
+                    // This is the tidy path, not the safety net: it caps an icon into the More
+                    // menu before anything overlaps. The layout below is what actually guarantees
+                    // the section is on screen, because this is ignored entirely in FIXED mode.
+                    reservedHeight =
+                        SidebarIconRail.SectionDivider +
+                            (if (customizeOnThisBar) SidebarIconRail.CustomizeButton else 0.dp) +
+                            (if (onOpenTools != null) SidebarIconRail.ToolLauncherButton else 0.dp) +
+                            SidebarIconRail.bottomSectionHeight(bottomActionRows),
+                )
+            Column(
+                modifier = Modifier.fillMaxSize(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                // The slots take what is LEFT once the bottom section has its height, rather than
+                // the section taking what is left after the slots. The reserve above is what
+                // normally keeps them apart, but it is only honoured in ADAPTIVE mode -
+                // computeSlotIconLimits returns early for FIXED and never reads reservedHeight -
+                // and it cannot help a rail too short to hold both. Laid out the other way round,
+                // those cases push the section past the bottom of the window, and the content that
+                // goes missing is Settings / Search / Sign Out with no floating cluster behind it.
+                // Clipped, the slots lose an icon they already have a More button for.
+                Column(
+                    modifier = Modifier.weight(1f).clipToBounds(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    DraggableSidebarSection(
+                        slot = right.top.top,
+                        maxVisibleIcons = iconLimits[right.top.top],
+                    )
+                    SDivider()
+                    DraggableSidebarSection(
+                        slot = right.top.bottom,
+                        maxVisibleIcons = iconLimits[right.top.bottom],
+                    )
+                }
+
+                // Outside the clipped region, because its height is reserved outside the slots'
+                // budget and the layout has to agree with the reserve. It is also the wrong thing
+                // to lose: "View - Customize Sidebar..." force-reveals this bar precisely so this
+                // button has somewhere to land, so clipping it away breaks its own recovery path,
+                // and in FIXED icon-limit mode - where reservedHeight is never read - a tall limit
+                // would do exactly that.
+                //
+                // The cost, stated because it is a real one: on this bar the button now sits below
+                // both slots whichever the user dropped it into, rather than under the slot it
+                // belongs to. `slot` still follows that choice, so its hint direction and drag
+                // behaviour are unchanged, and BossLeftSideBar keeps the old shape entirely.
+                if (customizeOnThisBar) {
+                    SidebarCustomizeMenu(
+                        slot =
+                            if (customizeSlotId == SidebarVisibilitySettings.SLOT_RIGHT_TOP_TOP) {
+                                right.top.top
+                            } else {
+                                right.top.bottom
+                            },
+                    )
+                }
+                // Outside the clipped region for the same reason the customize button is, and
+                // above the bottom actions: the launcher is about the slots it sits under, while
+                // Settings / Search / Sign Out are about the app.
+                onOpenTools?.let { open -> RailToolLauncher(open, left, toolsOpen) }
+                SidebarBottomActions(bottomActions)
+            }
+        }
+    }
+}

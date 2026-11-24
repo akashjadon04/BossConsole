@@ -1,0 +1,19 @@
+package ai.rever.boss.cache
+
+import ai.rever.boss.plugin.api.TabIcon
+
+/**
+ * Desktop implementation of favicon cache loading.
+ */
+actual fun loadFaviconFromCache(cacheKey: String?): ai.rever.boss.plugin.api.TabIcon.Image? {
+    if (cacheKey == null) return null
+    return FaviconCache.loadFavicon(cacheKey)
+}
+
+/**
+ * Desktop implementation of page favicon resolution.
+ */
+actual suspend fun loadHighQualityFavicon(
+    url: String?,
+    standardCacheKey: String?,
+): ai.rever.boss.plugin.api.TabIcon.Image? = HighQualityFaviconService.getHighQualityFavicon(url, standardCacheKey)

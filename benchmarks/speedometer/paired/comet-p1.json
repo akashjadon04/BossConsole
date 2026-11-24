@@ -1,0 +1,1067 @@
+{
+  "occludedDuringRun": false,
+  "ambientCpuPercent": {
+    "samples": [
+      818,
+      715,
+      671,
+      736,
+      709,
+      709,
+      746,
+      848,
+      788,
+      776
+    ],
+    "median": 746
+  },
+  "browser": "Comet",
+  "binary": "/Applications/Comet.app/Contents/MacOS/Comet",
+  "userAgent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
+  "browserVersion": "Chrome/150.0.7871.228",
+  "benchmark": "Speedometer 3.1",
+  "url": "https://browserbench.org/Speedometer3.1/?startAutomatically=1&iterationCount=10",
+  "iterationCount": 10,
+  "viewport": {
+    "w": 1270,
+    "h": 780,
+    "dpr": 2
+  },
+  "recordedAt": "2026-07-31T08:03:01.681Z",
+  "score": 44.7,
+  "scoreText": "44.7",
+  "confidenceText": "± 1.9",
+  "valid": true,
+  "suites": {
+    "TodoMVC-JavaScript-ES5": {
+      "mean": 25.854500079154967,
+      "delta": 3.837270166636214,
+      "unit": "ms"
+    },
+    "TodoMVC-JavaScript-ES5/Adding100Items": {
+      "mean": 16.521000015735627,
+      "delta": 2.9715071971262215,
+      "unit": "ms"
+    },
+    "TodoMVC-JavaScript-ES5/Adding100Items/Sync": {
+      "mean": 12.451499998569489,
+      "delta": 0.7675979670982813,
+      "unit": "ms"
+    },
+    "TodoMVC-JavaScript-ES5/Adding100Items/Async": {
+      "mean": 4.0695000171661375,
+      "delta": 2.208673513410164,
+      "unit": "ms"
+    },
+    "TodoMVC-JavaScript-ES5/CompletingAllItems": {
+      "mean": 5.977000033855438,
+      "delta": 0.8216561702071589,
+      "unit": "ms"
+    },
+    "TodoMVC-JavaScript-ES5/CompletingAllItems/Sync": {
+      "mean": 4.583500027656555,
+      "delta": 0.587674940091241,
+      "unit": "ms"
+    },
+    "TodoMVC-JavaScript-ES5/CompletingAllItems/Async": {
+      "mean": 1.3935000061988831,
+      "delta": 0.24010409642376007,
+      "unit": "ms"
+    },
+    "TodoMVC-JavaScript-ES5/DeletingAllItems": {
+      "mean": 3.356500029563904,
+      "delta": 0.08128478708516199,
+      "unit": "ms"
+    },
+    "TodoMVC-JavaScript-ES5/DeletingAllItems/Sync": {
+      "mean": 3.0070000171661375,
+      "delta": 0.058825755355333825,
+      "unit": "ms"
+    },
+    "TodoMVC-JavaScript-ES5/DeletingAllItems/Async": {
+      "mean": 0.3495000123977661,
+      "delta": 0.03602327292317171,
+      "unit": "ms"
+    },
+    "TodoMVC-JavaScript-ES6-Webpack-Complex-DOM": {
+      "mean": 25.484499979019166,
+      "delta": 2.72664973690721,
+      "unit": "ms"
+    },
+    "TodoMVC-JavaScript-ES6-Webpack-Complex-DOM/Adding100Items": {
+      "mean": 12.425999999046326,
+      "delta": 2.2234699337312005,
+      "unit": "ms"
+    },
+    "TodoMVC-JavaScript-ES6-Webpack-Complex-DOM/Adding100Items/Sync": {
+      "mean": 9.302499973773957,
+      "delta": 0.9437835498573078,
+      "unit": "ms"
+    },
+    "TodoMVC-JavaScript-ES6-Webpack-Complex-DOM/Adding100Items/Async": {
+      "mean": 3.1235000252723695,
+      "delta": 1.282008779985033,
+      "unit": "ms"
+    },
+    "TodoMVC-JavaScript-ES6-Webpack-Complex-DOM/CompletingAllItems": {
+      "mean": 8.224500012397765,
+      "delta": 0.3939750539830531,
+      "unit": "ms"
+    },
+    "TodoMVC-JavaScript-ES6-Webpack-Complex-DOM/CompletingAllItems/Sync": {
+      "mean": 6.085000014305114,
+      "delta": 0.34057382779878903,
+      "unit": "ms"
+    },
+    "TodoMVC-JavaScript-ES6-Webpack-Complex-DOM/CompletingAllItems/Async": {
+      "mean": 2.1394999980926515,
+      "delta": 0.09433869564969445,
+      "unit": "ms"
+    },
+    "TodoMVC-JavaScript-ES6-Webpack-Complex-DOM/DeletingAllItems": {
+      "mean": 4.833999967575073,
+      "delta": 0.14032058582068266,
+      "unit": "ms"
+    },
+    "TodoMVC-JavaScript-ES6-Webpack-Complex-DOM/DeletingAllItems/Sync": {
+      "mean": 4.022499966621399,
+      "delta": 0.1405377263962832,
+      "unit": "ms"
+    },
+    "TodoMVC-JavaScript-ES6-Webpack-Complex-DOM/DeletingAllItems/Async": {
+      "mean": 0.8115000009536744,
+      "delta": 0.04511885151388151,
+      "unit": "ms"
+    },
+    "TodoMVC-WebComponents": {
+      "mean": 10.724500012397765,
+      "delta": 0.27521594966978197,
+      "unit": "ms"
+    },
+    "TodoMVC-WebComponents/Adding100Items": {
+      "mean": 5.472000014781952,
+      "delta": 0.23642397417264926,
+      "unit": "ms"
+    },
+    "TodoMVC-WebComponents/Adding100Items/Sync": {
+      "mean": 2.500000023841858,
+      "delta": 0.15131860373288913,
+      "unit": "ms"
+    },
+    "TodoMVC-WebComponents/Adding100Items/Async": {
+      "mean": 2.971999990940094,
+      "delta": 0.10422846723646625,
+      "unit": "ms"
+    },
+    "TodoMVC-WebComponents/CompletingAllItems": {
+      "mean": 3.0210000395774843,
+      "delta": 0.21496973808706996,
+      "unit": "ms"
+    },
+    "TodoMVC-WebComponents/CompletingAllItems/Sync": {
+      "mean": 1.5965000152587892,
+      "delta": 0.10452604895150412,
+      "unit": "ms"
+    },
+    "TodoMVC-WebComponents/CompletingAllItems/Async": {
+      "mean": 1.4245000243186952,
+      "delta": 0.11896894526184511,
+      "unit": "ms"
+    },
+    "TodoMVC-WebComponents/DeletingAllItems": {
+      "mean": 2.23149995803833,
+      "delta": 0.09470864934357638,
+      "unit": "ms"
+    },
+    "TodoMVC-WebComponents/DeletingAllItems/Sync": {
+      "mean": 1.8599999666213989,
+      "delta": 0.0743993875302666,
+      "unit": "ms"
+    },
+    "TodoMVC-WebComponents/DeletingAllItems/Async": {
+      "mean": 0.37149999141693113,
+      "delta": 0.026448366921852946,
+      "unit": "ms"
+    },
+    "TodoMVC-React-Complex-DOM": {
+      "mean": 20.731999945640563,
+      "delta": 0.6688431383684845,
+      "unit": "ms"
+    },
+    "TodoMVC-React-Complex-DOM/Adding100Items": {
+      "mean": 8.874999940395355,
+      "delta": 0.39681355208409685,
+      "unit": "ms"
+    },
+    "TodoMVC-React-Complex-DOM/Adding100Items/Sync": {
+      "mean": 6.312999963760376,
+      "delta": 0.3006447547668805,
+      "unit": "ms"
+    },
+    "TodoMVC-React-Complex-DOM/Adding100Items/Async": {
+      "mean": 2.5619999766349792,
+      "delta": 0.1212852738112978,
+      "unit": "ms"
+    },
+    "TodoMVC-React-Complex-DOM/CompletingAllItems": {
+      "mean": 7.277499985694885,
+      "delta": 0.21985666752844255,
+      "unit": "ms"
+    },
+    "TodoMVC-React-Complex-DOM/CompletingAllItems/Sync": {
+      "mean": 5.273000001907349,
+      "delta": 0.2099815611385645,
+      "unit": "ms"
+    },
+    "TodoMVC-React-Complex-DOM/CompletingAllItems/Async": {
+      "mean": 2.004499983787537,
+      "delta": 0.07690688212581788,
+      "unit": "ms"
+    },
+    "TodoMVC-React-Complex-DOM/DeletingAllItems": {
+      "mean": 4.5795000195503235,
+      "delta": 0.10492511486068813,
+      "unit": "ms"
+    },
+    "TodoMVC-React-Complex-DOM/DeletingAllItems/Sync": {
+      "mean": 3.7695000052452086,
+      "delta": 0.06776934413361277,
+      "unit": "ms"
+    },
+    "TodoMVC-React-Complex-DOM/DeletingAllItems/Async": {
+      "mean": 0.8100000143051147,
+      "delta": 0.05345268424457848,
+      "unit": "ms"
+    },
+    "TodoMVC-React-Redux": {
+      "mean": 22.080000007152556,
+      "delta": 0.9000571264931753,
+      "unit": "ms"
+    },
+    "TodoMVC-React-Redux/Adding100Items": {
+      "mean": 9.335999977588653,
+      "delta": 0.4635637596557499,
+      "unit": "ms"
+    },
+    "TodoMVC-React-Redux/Adding100Items/Sync": {
+      "mean": 7.27099996805191,
+      "delta": 0.4468032203399722,
+      "unit": "ms"
+    },
+    "TodoMVC-React-Redux/Adding100Items/Async": {
+      "mean": 2.0650000095367433,
+      "delta": 0.045305957486608726,
+      "unit": "ms"
+    },
+    "TodoMVC-React-Redux/CompletingAllItems": {
+      "mean": 8.256500017642974,
+      "delta": 0.3138617984223642,
+      "unit": "ms"
+    },
+    "TodoMVC-React-Redux/CompletingAllItems/Sync": {
+      "mean": 6.796000003814697,
+      "delta": 0.2641326158746602,
+      "unit": "ms"
+    },
+    "TodoMVC-React-Redux/CompletingAllItems/Async": {
+      "mean": 1.4605000138282775,
+      "delta": 0.05931306563208187,
+      "unit": "ms"
+    },
+    "TodoMVC-React-Redux/DeletingAllItems": {
+      "mean": 4.487500011920929,
+      "delta": 0.21184878673058183,
+      "unit": "ms"
+    },
+    "TodoMVC-React-Redux/DeletingAllItems/Sync": {
+      "mean": 4.1254999995231625,
+      "delta": 0.20291190105707674,
+      "unit": "ms"
+    },
+    "TodoMVC-React-Redux/DeletingAllItems/Async": {
+      "mean": 0.36200001239776614,
+      "delta": 0.038824526891872206,
+      "unit": "ms"
+    },
+    "TodoMVC-Backbone": {
+      "mean": 15.521999990940094,
+      "delta": 0.8848077675792482,
+      "unit": "ms"
+    },
+    "TodoMVC-Backbone/Adding100Items": {
+      "mean": 7.724999988079071,
+      "delta": 0.6903265983136286,
+      "unit": "ms"
+    },
+    "TodoMVC-Backbone/Adding100Items/Sync": {
+      "mean": 5.411999988555908,
+      "delta": 0.5546648530827232,
+      "unit": "ms"
+    },
+    "TodoMVC-Backbone/Adding100Items/Async": {
+      "mean": 2.312999999523163,
+      "delta": 0.1538174371376796,
+      "unit": "ms"
+    },
+    "TodoMVC-Backbone/CompletingAllItems": {
+      "mean": 4.696999955177307,
+      "delta": 0.18212510796137943,
+      "unit": "ms"
+    },
+    "TodoMVC-Backbone/CompletingAllItems/Sync": {
+      "mean": 2.7949999928474427,
+      "delta": 0.12512500828282744,
+      "unit": "ms"
+    },
+    "TodoMVC-Backbone/CompletingAllItems/Async": {
+      "mean": 1.9019999623298645,
+      "delta": 0.09785553282910892,
+      "unit": "ms"
+    },
+    "TodoMVC-Backbone/DeletingAllItems": {
+      "mean": 3.1000000476837157,
+      "delta": 0.12405250522683832,
+      "unit": "ms"
+    },
+    "TodoMVC-Backbone/DeletingAllItems/Sync": {
+      "mean": 2.6315000295639037,
+      "delta": 0.10455325309197995,
+      "unit": "ms"
+    },
+    "TodoMVC-Backbone/DeletingAllItems/Async": {
+      "mean": 0.468500018119812,
+      "delta": 0.05131017871527932,
+      "unit": "ms"
+    },
+    "TodoMVC-Angular-Complex-DOM": {
+      "mean": 19.27799994945526,
+      "delta": 0.9416876363608845,
+      "unit": "ms"
+    },
+    "TodoMVC-Angular-Complex-DOM/Adding100Items": {
+      "mean": 10.80199999809265,
+      "delta": 0.804440264308331,
+      "unit": "ms"
+    },
+    "TodoMVC-Angular-Complex-DOM/Adding100Items/Sync": {
+      "mean": 8.257000005245208,
+      "delta": 0.7484804091953118,
+      "unit": "ms"
+    },
+    "TodoMVC-Angular-Complex-DOM/Adding100Items/Async": {
+      "mean": 2.5449999928474427,
+      "delta": 0.08303140062545683,
+      "unit": "ms"
+    },
+    "TodoMVC-Angular-Complex-DOM/CompletingAllItems": {
+      "mean": 4.885499989986419,
+      "delta": 0.14448961471142774,
+      "unit": "ms"
+    },
+    "TodoMVC-Angular-Complex-DOM/CompletingAllItems/Sync": {
+      "mean": 2.966499984264374,
+      "delta": 0.11249098147140439,
+      "unit": "ms"
+    },
+    "TodoMVC-Angular-Complex-DOM/CompletingAllItems/Async": {
+      "mean": 1.919000005722046,
+      "delta": 0.06521136847745276,
+      "unit": "ms"
+    },
+    "TodoMVC-Angular-Complex-DOM/DeletingAllItems": {
+      "mean": 3.59049996137619,
+      "delta": 0.2295371257045553,
+      "unit": "ms"
+    },
+    "TodoMVC-Angular-Complex-DOM/DeletingAllItems/Sync": {
+      "mean": 3.1269999861717226,
+      "delta": 0.223199496367399,
+      "unit": "ms"
+    },
+    "TodoMVC-Angular-Complex-DOM/DeletingAllItems/Async": {
+      "mean": 0.4634999752044678,
+      "delta": 0.03588884396038403,
+      "unit": "ms"
+    },
+    "TodoMVC-Vue": {
+      "mean": 14.174499988555908,
+      "delta": 0.5081200882757116,
+      "unit": "ms"
+    },
+    "TodoMVC-Vue/Adding100Items": {
+      "mean": 7.141499996185303,
+      "delta": 0.24539771795352122,
+      "unit": "ms"
+    },
+    "TodoMVC-Vue/Adding100Items/Sync": {
+      "mean": 1.0675000071525573,
+      "delta": 0.03714235942531533,
+      "unit": "ms"
+    },
+    "TodoMVC-Vue/Adding100Items/Async": {
+      "mean": 6.073999989032745,
+      "delta": 0.21998306336091353,
+      "unit": "ms"
+    },
+    "TodoMVC-Vue/CompletingAllItems": {
+      "mean": 4.0944999814033505,
+      "delta": 0.2258663805399042,
+      "unit": "ms"
+    },
+    "TodoMVC-Vue/CompletingAllItems/Sync": {
+      "mean": 0.7289999961853028,
+      "delta": 0.057074343091305074,
+      "unit": "ms"
+    },
+    "TodoMVC-Vue/CompletingAllItems/Async": {
+      "mean": 3.3654999852180483,
+      "delta": 0.1809132502416759,
+      "unit": "ms"
+    },
+    "TodoMVC-Vue/DeletingAllItems": {
+      "mean": 2.9385000109672545,
+      "delta": 0.13356573522046042,
+      "unit": "ms"
+    },
+    "TodoMVC-Vue/DeletingAllItems/Sync": {
+      "mean": 1.5820000052452088,
+      "delta": 0.034890707241431416,
+      "unit": "ms"
+    },
+    "TodoMVC-Vue/DeletingAllItems/Async": {
+      "mean": 1.356500005722046,
+      "delta": 0.10505507480333968,
+      "unit": "ms"
+    },
+    "TodoMVC-jQuery": {
+      "mean": 64.97849990129471,
+      "delta": 4.679364124593136,
+      "unit": "ms"
+    },
+    "TodoMVC-jQuery/Adding100Items": {
+      "mean": 16.866499960422516,
+      "delta": 0.5806889493868634,
+      "unit": "ms"
+    },
+    "TodoMVC-jQuery/Adding100Items/Sync": {
+      "mean": 15.044999980926514,
+      "delta": 0.5842397205687613,
+      "unit": "ms"
+    },
+    "TodoMVC-jQuery/Adding100Items/Async": {
+      "mean": 1.8214999794960023,
+      "delta": 0.04174787367358604,
+      "unit": "ms"
+    },
+    "TodoMVC-jQuery/CompletingAllItems": {
+      "mean": 31.651999962329864,
+      "delta": 3.9058932890352382,
+      "unit": "ms"
+    },
+    "TodoMVC-jQuery/CompletingAllItems/Sync": {
+      "mean": 29.94799997806549,
+      "delta": 3.8978438682231076,
+      "unit": "ms"
+    },
+    "TodoMVC-jQuery/CompletingAllItems/Async": {
+      "mean": 1.7039999842643738,
+      "delta": 0.056296962119455014,
+      "unit": "ms"
+    },
+    "TodoMVC-jQuery/DeletingAllItems": {
+      "mean": 16.459999978542328,
+      "delta": 1.599386596131121,
+      "unit": "ms"
+    },
+    "TodoMVC-jQuery/DeletingAllItems/Sync": {
+      "mean": 16.101499998569487,
+      "delta": 1.5649656781677723,
+      "unit": "ms"
+    },
+    "TodoMVC-jQuery/DeletingAllItems/Async": {
+      "mean": 0.35849997997283933,
+      "delta": 0.040608720070957234,
+      "unit": "ms"
+    },
+    "TodoMVC-Preact-Complex-DOM": {
+      "mean": 8.255500006675721,
+      "delta": 0.24577049929161524,
+      "unit": "ms"
+    },
+    "TodoMVC-Preact-Complex-DOM/Adding100Items": {
+      "mean": 3.908500003814697,
+      "delta": 0.11867706166661547,
+      "unit": "ms"
+    },
+    "TodoMVC-Preact-Complex-DOM/Adding100Items/Sync": {
+      "mean": 0.5389999985694885,
+      "delta": 0.02407070251257392,
+      "unit": "ms"
+    },
+    "TodoMVC-Preact-Complex-DOM/Adding100Items/Async": {
+      "mean": 3.3695000052452087,
+      "delta": 0.0970716252527701,
+      "unit": "ms"
+    },
+    "TodoMVC-Preact-Complex-DOM/CompletingAllItems": {
+      "mean": 3.0544999837875366,
+      "delta": 0.10367123534743944,
+      "unit": "ms"
+    },
+    "TodoMVC-Preact-Complex-DOM/CompletingAllItems/Sync": {
+      "mean": 0.5879999876022339,
+      "delta": 0.027715907360827064,
+      "unit": "ms"
+    },
+    "TodoMVC-Preact-Complex-DOM/CompletingAllItems/Async": {
+      "mean": 2.466499996185303,
+      "delta": 0.0914713865109224,
+      "unit": "ms"
+    },
+    "TodoMVC-Preact-Complex-DOM/DeletingAllItems": {
+      "mean": 1.2925000190734863,
+      "delta": 0.08559824282359593,
+      "unit": "ms"
+    },
+    "TodoMVC-Preact-Complex-DOM/DeletingAllItems/Sync": {
+      "mean": 0.4759999871253967,
+      "delta": 0.027695410633067453,
+      "unit": "ms"
+    },
+    "TodoMVC-Preact-Complex-DOM/DeletingAllItems/Async": {
+      "mean": 0.8165000319480896,
+      "delta": 0.05828804328913262,
+      "unit": "ms"
+    },
+    "TodoMVC-Svelte-Complex-DOM": {
+      "mean": 7.696000063419342,
+      "delta": 0.3669640539612781,
+      "unit": "ms"
+    },
+    "TodoMVC-Svelte-Complex-DOM/Adding100Items": {
+      "mean": 3.7625,
+      "delta": 0.2245648854520538,
+      "unit": "ms"
+    },
+    "TodoMVC-Svelte-Complex-DOM/Adding100Items/Sync": {
+      "mean": 0.7004999876022339,
+      "delta": 0.06071057295925354,
+      "unit": "ms"
+    },
+    "TodoMVC-Svelte-Complex-DOM/Adding100Items/Async": {
+      "mean": 3.062000012397766,
+      "delta": 0.17211729090955444,
+      "unit": "ms"
+    },
+    "TodoMVC-Svelte-Complex-DOM/CompletingAllItems": {
+      "mean": 2.69900004863739,
+      "delta": 0.1450821132234276,
+      "unit": "ms"
+    },
+    "TodoMVC-Svelte-Complex-DOM/CompletingAllItems/Sync": {
+      "mean": 0.51500004529953,
+      "delta": 0.03830111247935905,
+      "unit": "ms"
+    },
+    "TodoMVC-Svelte-Complex-DOM/CompletingAllItems/Async": {
+      "mean": 2.18400000333786,
+      "delta": 0.1148142195051196,
+      "unit": "ms"
+    },
+    "TodoMVC-Svelte-Complex-DOM/DeletingAllItems": {
+      "mean": 1.2345000147819518,
+      "delta": 0.06820840723907572,
+      "unit": "ms"
+    },
+    "TodoMVC-Svelte-Complex-DOM/DeletingAllItems/Sync": {
+      "mean": 0.42300001382827757,
+      "delta": 0.02832468298479309,
+      "unit": "ms"
+    },
+    "TodoMVC-Svelte-Complex-DOM/DeletingAllItems/Async": {
+      "mean": 0.8115000009536744,
+      "delta": 0.04976316385364897,
+      "unit": "ms"
+    },
+    "TodoMVC-Lit-Complex-DOM": {
+      "mean": 10.724000000953675,
+      "delta": 0.32464470497459275,
+      "unit": "ms"
+    },
+    "TodoMVC-Lit-Complex-DOM/Adding100Items": {
+      "mean": 5.683999991416931,
+      "delta": 0.21122753029155278,
+      "unit": "ms"
+    },
+    "TodoMVC-Lit-Complex-DOM/Adding100Items/Sync": {
+      "mean": 0.6710000038146973,
+      "delta": 0.04548755056362079,
+      "unit": "ms"
+    },
+    "TodoMVC-Lit-Complex-DOM/Adding100Items/Async": {
+      "mean": 5.0129999876022335,
+      "delta": 0.1745855019169086,
+      "unit": "ms"
+    },
+    "TodoMVC-Lit-Complex-DOM/CompletingAllItems": {
+      "mean": 3.309500002861023,
+      "delta": 0.13248002703480663,
+      "unit": "ms"
+    },
+    "TodoMVC-Lit-Complex-DOM/CompletingAllItems/Sync": {
+      "mean": 0.7994999885559082,
+      "delta": 0.03890681670391732,
+      "unit": "ms"
+    },
+    "TodoMVC-Lit-Complex-DOM/CompletingAllItems/Async": {
+      "mean": 2.5100000143051147,
+      "delta": 0.10645232677708248,
+      "unit": "ms"
+    },
+    "TodoMVC-Lit-Complex-DOM/DeletingAllItems": {
+      "mean": 1.7305000066757201,
+      "delta": 0.08032427717940202,
+      "unit": "ms"
+    },
+    "TodoMVC-Lit-Complex-DOM/DeletingAllItems/Sync": {
+      "mean": 0.7160000205039978,
+      "delta": 0.02341209156199962,
+      "unit": "ms"
+    },
+    "TodoMVC-Lit-Complex-DOM/DeletingAllItems/Async": {
+      "mean": 1.0144999861717223,
+      "delta": 0.0726487391017753,
+      "unit": "ms"
+    },
+    "NewsSite-Next": {
+      "mean": 50.155999982357024,
+      "delta": 0.9435056614643045,
+      "unit": "ms"
+    },
+    "NewsSite-Next/NavigateToUS": {
+      "mean": 18.637499976158143,
+      "delta": 0.6070126892156541,
+      "unit": "ms"
+    },
+    "NewsSite-Next/NavigateToUS/Sync": {
+      "mean": 6.74650000333786,
+      "delta": 0.4659562814099069,
+      "unit": "ms"
+    },
+    "NewsSite-Next/NavigateToUS/Async": {
+      "mean": 11.890999972820282,
+      "delta": 0.16806911311824377,
+      "unit": "ms"
+    },
+    "NewsSite-Next/NavigateToWorld": {
+      "mean": 15.819000017642974,
+      "delta": 0.24784587857560866,
+      "unit": "ms"
+    },
+    "NewsSite-Next/NavigateToWorld/Sync": {
+      "mean": 5.142500019073486,
+      "delta": 0.21603467222089018,
+      "unit": "ms"
+    },
+    "NewsSite-Next/NavigateToWorld/Async": {
+      "mean": 10.676499998569488,
+      "delta": 0.20737845846938274,
+      "unit": "ms"
+    },
+    "NewsSite-Next/NavigateToPolitics": {
+      "mean": 15.699499988555909,
+      "delta": 0.3958001148944929,
+      "unit": "ms"
+    },
+    "NewsSite-Next/NavigateToPolitics/Sync": {
+      "mean": 4.9079999923706055,
+      "delta": 0.3347822635384962,
+      "unit": "ms"
+    },
+    "NewsSite-Next/NavigateToPolitics/Async": {
+      "mean": 10.791499996185303,
+      "delta": 0.21196818983244567,
+      "unit": "ms"
+    },
+    "NewsSite-Nuxt": {
+      "mean": 39.64400005340576,
+      "delta": 0.8473746853216412,
+      "unit": "ms"
+    },
+    "NewsSite-Nuxt/NavigateToUS": {
+      "mean": 13.902000021934509,
+      "delta": 0.30862855937853545,
+      "unit": "ms"
+    },
+    "NewsSite-Nuxt/NavigateToUS/Sync": {
+      "mean": 3.759999990463257,
+      "delta": 0.22468355885112448,
+      "unit": "ms"
+    },
+    "NewsSite-Nuxt/NavigateToUS/Async": {
+      "mean": 10.142000031471252,
+      "delta": 0.29112279969733773,
+      "unit": "ms"
+    },
+    "NewsSite-Nuxt/NavigateToWorld": {
+      "mean": 12.724000036716461,
+      "delta": 0.17418283371258111,
+      "unit": "ms"
+    },
+    "NewsSite-Nuxt/NavigateToWorld/Sync": {
+      "mean": 3.6175000071525574,
+      "delta": 0.06004667624078738,
+      "unit": "ms"
+    },
+    "NewsSite-Nuxt/NavigateToWorld/Async": {
+      "mean": 9.106500029563904,
+      "delta": 0.16531683911169195,
+      "unit": "ms"
+    },
+    "NewsSite-Nuxt/NavigateToPolitics": {
+      "mean": 13.017999994754792,
+      "delta": 0.5990237469695938,
+      "unit": "ms"
+    },
+    "NewsSite-Nuxt/NavigateToPolitics/Sync": {
+      "mean": 3.6764999866485595,
+      "delta": 0.13516323649286496,
+      "unit": "ms"
+    },
+    "NewsSite-Nuxt/NavigateToPolitics/Async": {
+      "mean": 9.341500008106232,
+      "delta": 0.4803202286599328,
+      "unit": "ms"
+    },
+    "Editor-CodeMirror": {
+      "mean": 15.689000010490417,
+      "delta": 2.3216093010406444,
+      "unit": "ms"
+    },
+    "Editor-CodeMirror/Long": {
+      "mean": 8.078500020503999,
+      "delta": 1.597967528294593,
+      "unit": "ms"
+    },
+    "Editor-CodeMirror/Long/Sync": {
+      "mean": 5.5740000128746034,
+      "delta": 1.2870204310730242,
+      "unit": "ms"
+    },
+    "Editor-CodeMirror/Long/Async": {
+      "mean": 2.5045000076293946,
+      "delta": 0.32821834181862236,
+      "unit": "ms"
+    },
+    "Editor-CodeMirror/Highlight": {
+      "mean": 7.61049998998642,
+      "delta": 0.7325773349971965,
+      "unit": "ms"
+    },
+    "Editor-CodeMirror/Highlight/Sync": {
+      "mean": 6.876999986171723,
+      "delta": 0.7349055274740437,
+      "unit": "ms"
+    },
+    "Editor-CodeMirror/Highlight/Async": {
+      "mean": 0.7335000038146973,
+      "delta": 0.028666405392915605,
+      "unit": "ms"
+    },
+    "Editor-TipTap": {
+      "mean": 47.80849995613098,
+      "delta": 2.3317549602397976,
+      "unit": "ms"
+    },
+    "Editor-TipTap/Long": {
+      "mean": 28.06049998998642,
+      "delta": 1.4781776836313334,
+      "unit": "ms"
+    },
+    "Editor-TipTap/Long/Sync": {
+      "mean": 26.432000005245207,
+      "delta": 1.511227159774683,
+      "unit": "ms"
+    },
+    "Editor-TipTap/Long/Async": {
+      "mean": 1.628499984741211,
+      "delta": 0.45639183812490025,
+      "unit": "ms"
+    },
+    "Editor-TipTap/Highlight": {
+      "mean": 19.74799996614456,
+      "delta": 0.8860792062592223,
+      "unit": "ms"
+    },
+    "Editor-TipTap/Highlight/Sync": {
+      "mean": 18.687499976158144,
+      "delta": 0.8824188380142213,
+      "unit": "ms"
+    },
+    "Editor-TipTap/Highlight/Async": {
+      "mean": 1.0604999899864196,
+      "delta": 0.059337023956924695,
+      "unit": "ms"
+    },
+    "Charts-observable-plot": {
+      "mean": 30.301500034332275,
+      "delta": 2.389538772538378,
+      "unit": "ms"
+    },
+    "Charts-observable-plot/Stacked by 6": {
+      "mean": 12.863000011444091,
+      "delta": 1.3829114140860148,
+      "unit": "ms"
+    },
+    "Charts-observable-plot/Stacked by 6/Sync": {
+      "mean": 10.497500014305114,
+      "delta": 1.2443842678104122,
+      "unit": "ms"
+    },
+    "Charts-observable-plot/Stacked by 6/Async": {
+      "mean": 2.365499997138977,
+      "delta": 0.15319005012238024,
+      "unit": "ms"
+    },
+    "Charts-observable-plot/Stacked by 20": {
+      "mean": 11.970999991893768,
+      "delta": 0.8375613520412225,
+      "unit": "ms"
+    },
+    "Charts-observable-plot/Stacked by 20/Sync": {
+      "mean": 9.130999994277953,
+      "delta": 0.755178394539518,
+      "unit": "ms"
+    },
+    "Charts-observable-plot/Stacked by 20/Async": {
+      "mean": 2.839999997615814,
+      "delta": 0.15218972360413535,
+      "unit": "ms"
+    },
+    "Charts-observable-plot/Dotted": {
+      "mean": 5.467500030994415,
+      "delta": 0.28405486999564417,
+      "unit": "ms"
+    },
+    "Charts-observable-plot/Dotted/Sync": {
+      "mean": 3.269000005722046,
+      "delta": 0.20884527230010275,
+      "unit": "ms"
+    },
+    "Charts-observable-plot/Dotted/Async": {
+      "mean": 2.198500025272369,
+      "delta": 0.11580349230977198,
+      "unit": "ms"
+    },
+    "Charts-chartjs": {
+      "mean": 28.266999995708467,
+      "delta": 2.398115346607156,
+      "unit": "ms"
+    },
+    "Charts-chartjs/Draw scatter": {
+      "mean": 14.866499972343444,
+      "delta": 1.6350534523990565,
+      "unit": "ms"
+    },
+    "Charts-chartjs/Draw scatter/Sync": {
+      "mean": 13.784499990940095,
+      "delta": 1.5120605616476919,
+      "unit": "ms"
+    },
+    "Charts-chartjs/Draw scatter/Async": {
+      "mean": 1.0819999814033507,
+      "delta": 0.1280246627614241,
+      "unit": "ms"
+    },
+    "Charts-chartjs/Show tooltip": {
+      "mean": 6.024000024795532,
+      "delta": 0.5917072215645913,
+      "unit": "ms"
+    },
+    "Charts-chartjs/Show tooltip/Sync": {
+      "mean": 0.2569999933242798,
+      "delta": 0.019532702438680303,
+      "unit": "ms"
+    },
+    "Charts-chartjs/Show tooltip/Async": {
+      "mean": 5.767000031471253,
+      "delta": 0.5847071772091187,
+      "unit": "ms"
+    },
+    "Charts-chartjs/Draw opaque scatter": {
+      "mean": 7.376499998569488,
+      "delta": 0.19841790055656233,
+      "unit": "ms"
+    },
+    "Charts-chartjs/Draw opaque scatter/Sync": {
+      "mean": 6.811500000953674,
+      "delta": 0.20767299853012974,
+      "unit": "ms"
+    },
+    "Charts-chartjs/Draw opaque scatter/Async": {
+      "mean": 0.5649999976158142,
+      "delta": 0.030906950863188645,
+      "unit": "ms"
+    },
+    "React-Stockcharts-SVG": {
+      "mean": 50.540499973297116,
+      "delta": 3.1329533517220662,
+      "unit": "ms"
+    },
+    "React-Stockcharts-SVG/Render": {
+      "mean": 15.351999998092651,
+      "delta": 1.5182392067564645,
+      "unit": "ms"
+    },
+    "React-Stockcharts-SVG/Render/Sync": {
+      "mean": 13.362000000476836,
+      "delta": 1.476423285275517,
+      "unit": "ms"
+    },
+    "React-Stockcharts-SVG/Render/Async": {
+      "mean": 1.9899999976158143,
+      "delta": 0.04981885384488621,
+      "unit": "ms"
+    },
+    "React-Stockcharts-SVG/PanTheChart": {
+      "mean": 10.870499980449676,
+      "delta": 0.6395245133786671,
+      "unit": "ms"
+    },
+    "React-Stockcharts-SVG/PanTheChart/Sync": {
+      "mean": 1.8369999885559083,
+      "delta": 0.22713251887518868,
+      "unit": "ms"
+    },
+    "React-Stockcharts-SVG/PanTheChart/Async": {
+      "mean": 9.033499991893768,
+      "delta": 0.4288133645163836,
+      "unit": "ms"
+    },
+    "React-Stockcharts-SVG/ZoomTheChart": {
+      "mean": 24.317999994754793,
+      "delta": 1.0935594256258814,
+      "unit": "ms"
+    },
+    "React-Stockcharts-SVG/ZoomTheChart/Sync": {
+      "mean": 23.596499967575074,
+      "delta": 1.062630762944461,
+      "unit": "ms"
+    },
+    "React-Stockcharts-SVG/ZoomTheChart/Async": {
+      "mean": 0.7215000271797181,
+      "delta": 0.03811694953528632,
+      "unit": "ms"
+    },
+    "Perf-Dashboard": {
+      "mean": 27.617000031471253,
+      "delta": 1.3242951345975542,
+      "unit": "ms"
+    },
+    "Perf-Dashboard/Render": {
+      "mean": 6.61800000667572,
+      "delta": 0.3300183148257045,
+      "unit": "ms"
+    },
+    "Perf-Dashboard/Render/Sync": {
+      "mean": 5.271000015735626,
+      "delta": 0.24525718771398486,
+      "unit": "ms"
+    },
+    "Perf-Dashboard/Render/Async": {
+      "mean": 1.346999990940094,
+      "delta": 0.10379114554340828,
+      "unit": "ms"
+    },
+    "Perf-Dashboard/SelectingPoints": {
+      "mean": 13.545000004768372,
+      "delta": 0.9013480542370493,
+      "unit": "ms"
+    },
+    "Perf-Dashboard/SelectingPoints/Sync": {
+      "mean": 12.671000003814697,
+      "delta": 0.8867296335873034,
+      "unit": "ms"
+    },
+    "Perf-Dashboard/SelectingPoints/Async": {
+      "mean": 0.8740000009536744,
+      "delta": 0.046292901691005486,
+      "unit": "ms"
+    },
+    "Perf-Dashboard/SelectingRange": {
+      "mean": 7.454000020027161,
+      "delta": 0.42116301050056554,
+      "unit": "ms"
+    },
+    "Perf-Dashboard/SelectingRange/Sync": {
+      "mean": 6.7525000214576725,
+      "delta": 0.40326025717282743,
+      "unit": "ms"
+    },
+    "Perf-Dashboard/SelectingRange/Async": {
+      "mean": 0.7014999985694885,
+      "delta": 0.03759122168726124,
+      "unit": "ms"
+    },
+    "Iteration-0-Total": {
+      "mean": 32.48050003647804,
+      "delta": 9.226623502952211,
+      "unit": "ms"
+    },
+    "Iteration-1-Total": {
+      "mean": 26.0504999935627,
+      "delta": 7.463684140993893,
+      "unit": "ms"
+    },
+    "Iteration-2-Total": {
+      "mean": 26.273249983787537,
+      "delta": 7.61458965811607,
+      "unit": "ms"
+    },
+    "Iteration-3-Total": {
+      "mean": 26.18325001001358,
+      "delta": 7.2561941743907585,
+      "unit": "ms"
+    },
+    "Iteration-4-Total": {
+      "mean": 25.959499979019164,
+      "delta": 7.221577777232711,
+      "unit": "ms"
+    },
+    "Iteration-5-Total": {
+      "mean": 26.169500017166136,
+      "delta": 7.298512393036913,
+      "unit": "ms"
+    },
+    "Iteration-6-Total": {
+      "mean": 25.778999996185302,
+      "delta": 7.294108734766933,
+      "unit": "ms"
+    },
+    "Iteration-7-Total": {
+      "mean": 26.49650000333786,
+      "delta": 7.656602596728744,
+      "unit": "ms"
+    },
+    "Iteration-8-Total": {
+      "mean": 25.704500013589858,
+      "delta": 7.271877774477761,
+      "unit": "ms"
+    },
+    "Iteration-9-Total": {
+      "mean": 26.66724994778633,
+      "delta": 7.515217253887818,
+      "unit": "ms"
+    },
+    "Geomean": {
+      "mean": 22.44271599734212,
+      "delta": 1.1417712210473485,
+      "unit": "ms"
+    },
+    "Score": {
+      "mean": 44.73181345830144,
+      "delta": 1.945016128737303,
+      "unit": "score"
+    }
+  }
+}

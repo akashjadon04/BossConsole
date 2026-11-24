@@ -1,0 +1,358 @@
+name: JxBrowser Auto-Release
+
+run-name: JxBrowser auto-release${{ inputs.target_version && format(' — {0}', inputs.target_version) || '' }}
+
+on:
+  schedule:
+    # TeamDev releases roughly monthly. Four-hour polling keeps pickup prompt
+    # without spending hundreds of no-op runner minutes each month.
+    - cron: '17 */4 * * *'
+  workflow_dispatch:
+    inputs:
+      target_version:
+        description: 'Force a specific JxBrowser version (testing/backfill)'
+        required: false
+      dry_run:
+        description: 'Resolve and validate the release without dispatching a build'
+        type: boolean
+        default: false
+
+concurrency:
+  group: jxbrowser-autorelease
+  cancel-in-progress: false
+
+permissions:
+  # contents: write and pull-requests: write are for the pin-bump PR below; the
+  # resolver itself only reads.
+  contents: write
+  actions: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  check-and-dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # The pin-bump step pushes a branch, so the checkout has to carry a
+          # token that can. PROJECT_TOKEN is preferred over github.token for one
+          # reason: GitHub does not raise pull_request events for PRs opened with
+          # the default token, so a bump PR created that way would sit with zero
+          # CI runs - and CI is the entire point of proposing it as a PR instead
+          # of committing straight to main. Falls back rather than failing hard,
+          # because a PR with no checks still beats no PR at all.
+          token: ${{ secrets.PROJECT_TOKEN || github.token }}
+
+      - name: Resolve latest JxBrowser release
+        id: release
+        continue-on-error: true
+        env:
+          RELEASES_TOKEN: ${{ secrets.PUBLIC_REPO_TOKEN }}
+          SOURCE_TOKEN: ${{ github.token }}
+          TARGET_VERSION: ${{ inputs.target_version }}
+        run: bash .github/scripts/check-jxbrowser-release.sh
+
+      - name: Report broken watcher
+        if: steps.release.outcome == 'failure'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          issue_title="JxBrowser auto-release watcher is broken"
+          issues="$(gh issue list \
+            --repo "$GITHUB_REPOSITORY" \
+            --state open \
+            --search "$issue_title in:title" \
+            --json number,title)"
+          issue_number="$(jq -r --arg title "$issue_title" \
+            'first(.[] | select(.title == $title) | .number) // empty' <<< "$issues")"
+          if [[ -n "$issue_number" ]]; then
+            echo "Issue #$issue_number already tracks the watcher failure."
+            exit 0
+          fi
+          gh issue create \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$issue_title" \
+            --body "The scheduled JxBrowser resolver failed before it could make a dispatch decision. This can indicate malformed upstream metadata, an expired token, or an unreadable releases repository.
+
+          Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
+      - name: Close recovered watcher issue
+        if: steps.release.outcome == 'success'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          issue_title="JxBrowser auto-release watcher is broken"
+          issues="$(gh issue list \
+            --repo "$GITHUB_REPOSITORY" \
+            --state open \
+            --search "$issue_title in:title" \
+            --json number,title)"
+          issue_numbers="$(jq -r --arg title "$issue_title" \
+            '.[] | select(.title == $title) | .number' <<< "$issues")"
+          while IFS= read -r issue_number || [[ -n "$issue_number" ]]; do
+            if [[ -n "$issue_number" ]]; then
+              gh issue close "$issue_number" \
+                --repo "$GITHUB_REPOSITORY" \
+                --comment "The scheduled resolver is healthy again."
+            fi
+          done <<< "$issue_numbers"
+
+      - name: Restore artifact propagation state
+        if: steps.release.outputs.reason == 'artifact_not_ready'
+        uses: actions/cache@v6
+        with:
+          path: .jxbrowser-watcher-state/${{ steps.release.outputs.latest_version }}
+          key: jxbrowser-artifact-lag-${{ steps.release.outputs.latest_version }}-${{ github.run_id }}
+          restore-keys: |
+            jxbrowser-artifact-lag-${{ steps.release.outputs.latest_version }}-
+
+      - name: Measure artifact propagation delay
+        id: artifact_lag
+        if: steps.release.outputs.reason == 'artifact_not_ready'
+        env:
+          VERSION: ${{ steps.release.outputs.latest_version }}
+        run: |
+          set -euo pipefail
+          state_file=".jxbrowser-watcher-state/$VERSION/first-seen"
+          mkdir -p "$(dirname "$state_file")"
+          now="$(date +%s)"
+          if [[ -f "$state_file" ]]; then
+            first_seen="$(< "$state_file")"
+          else
+            first_seen="$now"
+            echo "$first_seen" > "$state_file"
+          fi
+          [[ "$first_seen" =~ ^[0-9]+$ ]] || {
+            echo "::error::Invalid artifact propagation timestamp: $first_seen"
+            exit 1
+          }
+          age_seconds="$((now - first_seen))"
+          should_report=false
+          if (( age_seconds >= 86400 )); then
+            should_report=true
+          fi
+          echo "should_report=$should_report" >> "$GITHUB_OUTPUT"
+          echo "Artifact propagation has been pending for $age_seconds seconds."
+
+      - name: Report auto-release blocker
+        if: (steps.release.outputs.reason == 'artifact_not_ready' && steps.artifact_lag.outputs.should_report == 'true') || steps.release.outputs.reason == 'release_repeatedly_failing'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.release.outputs.latest_version }}
+          REASON: ${{ steps.release.outputs.reason }}
+          BLOCKED_ARTIFACT: ${{ steps.release.outputs.blocked_artifact }}
+        run: |
+          set -euo pipefail
+          if [[ "$REASON" == "artifact_not_ready" ]]; then
+            issue_title="JxBrowser $VERSION release artifacts are not ready"
+            issue_body="TeamDev metadata has advertised JxBrowser $VERSION for at least 24 hours, but the required artifact \`$BLOCKED_ARTIFACT\` is still not resolvable. Automatic dispatch is paused until every required platform artifact is available."
+          else
+            issue_title="JxBrowser $VERSION auto-release is repeatedly failing"
+            issue_body="The two most recent automated Chromium branding runs for JxBrowser $VERSION failed. Automatic retries are paused to avoid repeatedly running the full platform matrix.
+
+          Inspect the failed runs, fix the underlying problem, then manually run \`build-chromium-branding.yml\` for version \`$VERSION\`."
+          fi
+          issues="$(gh issue list \
+            --repo "$GITHUB_REPOSITORY" \
+            --state open \
+            --search "$issue_title in:title" \
+            --json number,title)"
+          issue_number="$(jq -r --arg title "$issue_title" \
+            'first(.[] | select(.title == $title) | .number) // empty' <<< "$issues")"
+          if [[ -n "$issue_number" ]]; then
+            echo "Issue #$issue_number already tracks this failure."
+            exit 0
+          fi
+
+          gh issue create \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$issue_title" \
+            --body "$issue_body"
+
+      - name: Close recovered blocker issues
+        if: steps.release.outputs.latest_version != ''
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.release.outputs.latest_version }}
+          REASON: ${{ steps.release.outputs.reason }}
+        run: |
+          set -euo pipefail
+          close_recovered_issue() {
+            local active_reason="$1"
+            local issue_title="$2"
+            local issues issue_numbers issue_number
+            [[ "$REASON" == "$active_reason" ]] && return 0
+            if [[ "$active_reason" == "release_repeatedly_failing" && "$REASON" != "release_already_published" ]]; then
+              return 0
+            fi
+            issues="$(gh issue list \
+              --repo "$GITHUB_REPOSITORY" \
+              --state open \
+              --search "$issue_title in:title" \
+              --limit 100 \
+              --json number,title)"
+            issue_numbers="$(jq -r --arg title "$issue_title" \
+              '.[] | select(.title == $title) | .number' <<< "$issues")"
+            while IFS= read -r issue_number || [[ -n "$issue_number" ]]; do
+              if [[ -n "$issue_number" ]]; then
+                gh issue close "$issue_number" \
+                  --repo "$GITHUB_REPOSITORY" \
+                  --comment "The watcher recovered with status \`$REASON\`; closing this blocker automatically."
+              fi
+            done <<< "$issue_numbers"
+          }
+
+          close_recovered_issue \
+            artifact_not_ready \
+            "JxBrowser $VERSION release artifacts are not ready"
+          close_recovered_issue \
+            release_repeatedly_failing \
+            "JxBrowser $VERSION auto-release is repeatedly failing"
+
+          if [[ "$REASON" != "artifact_not_ready" && "$REASON" != "release_repeatedly_failing" ]]; then
+            stale_issues="$(gh issue list \
+              --repo "$GITHUB_REPOSITORY" \
+              --state open \
+              --search 'JxBrowser auto-release is repeatedly failing in:title' \
+              --limit 100 \
+              --json number,title)"
+            stale_issue_numbers="$(jq -r --arg current "JxBrowser $VERSION auto-release is repeatedly failing" '
+              .[]
+              | select(.title != $current)
+              | select(.title | test("^JxBrowser [0-9]+(\\.[0-9]+){2,3} auto-release is repeatedly failing$"))
+              | .number
+            ' <<< "$stale_issues")"
+            while IFS= read -r issue_number || [[ -n "$issue_number" ]]; do
+              if [[ -n "$issue_number" ]]; then
+                gh issue close "$issue_number" \
+                  --repo "$GITHUB_REPOSITORY" \
+                  --comment "JxBrowser $VERSION is now the resolved upstream candidate; closing this stale-version blocker."
+              fi
+            done <<< "$stale_issue_numbers"
+          fi
+
+      - name: Remove stale drafts beside a public release
+        if: steps.release.outputs.stale_draft == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PUBLIC_REPO_TOKEN }}
+          VERSION: ${{ steps.release.outputs.latest_version }}
+        run: |
+          set -euo pipefail
+          tag="chromium-v$VERSION"
+          release_pages="$(gh api \
+            --paginate \
+            --slurp \
+            'repos/akashjadon04/BossConsole-Releases/releases?per_page=100')"
+          draft_ids="$(jq -r --arg tag "$tag" '
+            .[][] | select(.tag_name == $tag and .draft == true) | .id
+          ' <<< "$release_pages")"
+          while IFS= read -r release_id || [[ -n "$release_id" ]]; do
+            if [[ -n "$release_id" ]]; then
+              gh api \
+                --method DELETE \
+                "repos/akashjadon04/BossConsole-Releases/releases/$release_id"
+            fi
+          done <<< "$draft_ids"
+
+      - name: Fail when the resolver is broken
+        if: steps.release.outcome == 'failure'
+        run: exit 1
+
+      - name: Dispatch Chromium branding
+        if: steps.release.outputs.should_dispatch == 'true' && (github.event_name != 'workflow_dispatch' || inputs.dry_run != true)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          JXBROWSER_VERSION: ${{ steps.release.outputs.latest_version }}
+        run: |
+          gh workflow run build-chromium-branding.yml \
+            --ref main \
+            -f jxbrowser_version="$JXBROWSER_VERSION"
+
+      # Runs when the engine for the resolved version is published and complete,
+      # which is exactly the state the resolver calls release_already_published.
+      # That makes one code path serve both routes: the normal one (branding
+      # publishes, the next scheduled run opens the PR, so at most four hours
+      # later) and the catch-up one (an engine published while the pin stood
+      # still). The script is idempotent across those four-hourly runs and leaves
+      # a closed-unmerged PR alone rather than reopening a declined bump.
+      - name: Open the version pin PR
+        id: pin
+        if: steps.release.outputs.reason == 'release_already_published'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_TOKEN || github.token }}
+          VERSION: ${{ steps.release.outputs.latest_version }}
+          BASE_BRANCH: main
+          DRY_RUN: ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && 'true' || 'false' }}
+        run: bash .github/scripts/open-jxbrowser-pin-pr.sh
+
+      - name: Report a broken pin bump
+        if: steps.pin.outcome == 'failure'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.release.outputs.latest_version }}
+        run: |
+          set -euo pipefail
+          issue_title="JxBrowser $VERSION pin bump could not be opened"
+          issues="$(gh issue list \
+            --repo "$GITHUB_REPOSITORY" \
+            --state open \
+            --search "$issue_title in:title" \
+            --json number,title)"
+          issue_number="$(jq -r --arg title "$issue_title" \
+            'first(.[] | select(.title == $title) | .number) // empty' <<< "$issues")"
+          if [[ -n "$issue_number" ]]; then
+            echo "Issue #$issue_number already tracks this failure."
+            exit 0
+          fi
+          gh issue create \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$issue_title" \
+            --body "The BOSS Chromium engine for JxBrowser $VERSION is published, but the automated pin bump in \`gradle/libs.versions.toml\` failed. The pin is still behind, so the shipped app keeps the previous engine until this is bumped by hand.
+
+          A push permission problem is the likeliest cause: the workflow prefers \`PROJECT_TOKEN\` and falls back to the default token, which cannot always push a branch.
+
+          Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
+      - name: Summary
+        if: always()
+        env:
+          VERSION: ${{ steps.release.outputs.latest_version }}
+          SHOULD_DISPATCH: ${{ steps.release.outputs.should_dispatch }}
+          REASON: ${{ steps.release.outputs.reason }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          PIN_ACTION: ${{ steps.pin.outputs.pin_action }}
+          PIN_CURRENT: ${{ steps.pin.outputs.current_pin }}
+          PIN_PR_URL: ${{ steps.pin.outputs.pin_pr_url }}
+        run: |
+          {
+            echo "## JxBrowser auto-release"
+            echo
+            echo "- Candidate: \`${VERSION:-unresolved}\`"
+            echo "- Dispatch required: \`${SHOULD_DISPATCH:-unknown}\`"
+            echo "- Reason: \`${REASON:-check_failed}\`"
+            echo "- Dry run: \`${DRY_RUN:-false}\`"
+            if [[ -n "${PIN_ACTION:-}" ]]; then
+              echo "- Pin (\`${PIN_CURRENT:-unknown}\`): \`$PIN_ACTION\`"
+              # A full `if`, not `[[ ... ]] && echo`. These blocks run under `bash -e`, and a
+              # trailing AND-list whose test is false returns 1 - which -e cannot tell apart from
+              # a command that failed. Being the last statement in this `if`, and so of the
+              # enclosing group, that exit status became the step's, and the job's.
+              #
+              # It fired on every run that had nothing to do, because `pin_pr_url` is empty
+              # precisely when there was no PR to open. A daily scheduled no-op reported itself
+              # as a failure, which is also where a real engine-release failure would have shown.
+              if [[ -n "${PIN_PR_URL:-}" ]]; then
+                echo "- Pin PR: $PIN_PR_URL"
+              fi
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

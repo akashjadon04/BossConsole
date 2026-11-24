@@ -1,0 +1,9 @@
+<?xml version="1.0" ?>
+<SmellBaseline>
+  <ManuallySuppressedIssues/>
+  <CurrentIssues>
+    <ID>ReturnCount:SemanticVersion.kt$SemanticVersion$override fun compareTo(other: SemanticVersion): Int</ID>
+    <ID>ReturnCount:SemanticVersion.kt$SemanticVersion.Companion$fun parse(version: String): SemanticVersion?</ID>
+    <ID>ReturnCount:SemanticVersion.kt$SemanticVersion.Companion$private fun comparePrerelease( a: String?, b: String?, ): Int</ID>
+  </CurrentIssues>
+</SmellBaseline>

@@ -1,0 +1,228 @@
+package ai.rever.boss.plugin.workspace
+
+import androidx.compose.runtime.Immutable
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+import kotlin.time.Clock
+
+/**
+ * Represents a tab configuration within a workspace.
+ *
+ * @property type The tab type: "browser", "terminal", or "editor"
+ * @property title Display title for the tab
+ * @property url URL for browser tabs
+ * @property filePath File path for editor tabs
+ * @property faviconCacheKey Cache key for browser tab favicon
+ * @property initialCommand Command to run on start for terminal tabs
+ * @property workingDirectory Working directory for terminal tabs
+ */
+@Immutable
+@Serializable
+data class TabConfig(
+    val type: String,
+    val title: String,
+    val url: String? = null,
+    val filePath: String? = null,
+    val faviconCacheKey: String? = null,
+    val initialCommand: String? = null,
+    val workingDirectory: String? = null,
+)
+
+/**
+ * Represents a panel configuration containing multiple tabs.
+ *
+ * @property id Unique identifier for the panel
+ * @property tabs List of tab configurations in this panel
+ * @property pinnedCount How many of the leading [tabs] are pinned. Pinned tabs are always the
+ *   first N of a panel, so one integer describes the whole pinning state - see `TabPinning.kt`.
+ *   Defaults to 0, which is what a workspace saved before pinning existed decodes to, and what a
+ *   panel with nothing pinned writes.
+ *
+ * **`@JvmOverloads` is load-bearing, not decoration.** This module is published, and plugins
+ * compile against it. A Kotlin default does NOT preserve the old constructor in bytecode: adding
+ * `pinnedCount` rewrote the primary constructor from `(String, List)` to `(String, List, int)`
+ * plus a synthetic `$default`, so every already-built plugin calling the two-argument form linked
+ * against a constructor that no longer existed. `BinaryCompatibilityValidator` rejects the
+ * *entire* plugin for that, and the host then disables it - which is how adding this field
+ * silently disabled the bookmarks plugin on a machine that had it. `@JvmOverloads` emits the
+ * two-argument constructor as a real overload, so old plugins keep linking.
+ *
+ * The same hazard applies to `copy()` and the generated serialization constructor, which
+ * `@JvmOverloads` does not preserve. Hidden overloads below restore their old descriptors without
+ * changing new Kotlin source calls. Any future field needs the same ABI audit; see
+ * `PanelConfigBinaryCompatTest` and the cross-jar `ApiPackageDivergenceTest`.
+ */
+@Immutable
+@Serializable
+data class PanelConfig
+    @JvmOverloads
+    constructor(
+        val id: String,
+        val tabs: List<TabConfig>,
+        val pinnedCount: Int = 0,
+    ) {
+        // The pinned plugin API still has the two-property data class. Keep its copy and
+        // copy$default descriptors while preserving the host-only pinned tab count. As with the
+        // generated copy, the consumer clamps this count to the resulting tab list on restore.
+        @Deprecated("Binary compatibility with the two-property plugin API", level = DeprecationLevel.HIDDEN)
+        fun copy(
+            id: String = this.id,
+            tabs: List<TabConfig> = this.tabs,
+        ): PanelConfig = PanelConfig(id, tabs, pinnedCount)
+
+        // Preserve the public serialization descriptor required by the cross-jar guard. Normal
+        // plugin loading shadows the API's serializer with the host's too, so it uses the new
+        // constructor. The deprecated SerializationConstructorMarker type is intentional here:
+        // only its exact JVM descriptor can preserve the old ABI; MissingFieldException is public.
+        @Deprecated("Binary compatibility with the two-property plugin API", level = DeprecationLevel.HIDDEN)
+        @OptIn(kotlinx.serialization.ExperimentalSerializationApi::class)
+        @Suppress("DEPRECATION_ERROR", "UNUSED_PARAMETER")
+        constructor(
+            seen: Int,
+            id: String?,
+            tabs: List<TabConfig>?,
+            marker: kotlinx.serialization.internal.SerializationConstructorMarker?,
+        ) : this(
+            id =
+                if (seen and 3 != 3) {
+                    throw kotlinx.serialization.MissingFieldException(
+                        listOfNotNull("id".takeIf { seen and 1 == 0 }, "tabs".takeIf { seen and 2 == 0 }),
+                        "ai.rever.boss.plugin.workspace.PanelConfig",
+                    )
+                } else {
+                    requireNotNull(id)
+                },
+            tabs = requireNotNull(tabs),
+            pinnedCount = 0,
+        )
+    }
+
+/**
+ * Represents a split layout configuration.
+ * Can be a single panel or a vertical/horizontal split of two layouts.
+ */
+@Immutable
+@Serializable
+sealed class SplitConfig {
+    /**
+     * A layout with a single panel.
+     */
+    @Immutable
+    @Serializable
+    data class SinglePanel(
+        val panel: PanelConfig,
+    ) : SplitConfig()
+
+    /**
+     * A vertical split with left and right layouts.
+     */
+    @Immutable
+    @Serializable
+    data class VerticalSplit(
+        val left: SplitConfig,
+        val right: SplitConfig,
+    ) : SplitConfig()
+
+    /**
+     * A horizontal split with top and bottom layouts.
+     */
+    @Immutable
+    @Serializable
+    data class HorizontalSplit(
+        val top: SplitConfig,
+        val bottom: SplitConfig,
+    ) : SplitConfig()
+}
+
+/**
+ * Extract all panels from a SplitConfig with human-readable labels.
+ *
+ * @param prefix Prefix for the label (used for nested splits)
+ * @return List of (panelId, label) pairs
+ */
+fun SplitConfig.extractPanels(prefix: String = ""): List<Pair<String, String>> =
+    when (this) {
+        is SplitConfig.SinglePanel -> {
+            val label = if (prefix.isEmpty()) "Main Panel" else prefix.trim() + " Panel"
+            listOf(panel.id to label)
+        }
+
+        is SplitConfig.VerticalSplit -> {
+            left.extractPanels("${prefix}Left ") + right.extractPanels("${prefix}Right ")
+        }
+
+        is SplitConfig.HorizontalSplit -> {
+            top.extractPanels("${prefix}Top ") + bottom.extractPanels("${prefix}Bottom ")
+        }
+    }
+
+/**
+ * Breadcrumb display configuration for workspaces.
+ *
+ * @property enabled Whether breadcrumbs are enabled
+ * @property showWorkspacePath Show workspace path in breadcrumb
+ * @property showTabPath Show tab path in breadcrumb
+ * @property maxLength Maximum length of breadcrumb text
+ * @property separator Separator character between breadcrumb segments
+ */
+@Immutable
+@Serializable
+data class BreadcrumbConfig(
+    val enabled: Boolean = true,
+    val showWorkspacePath: Boolean = true,
+    val showTabPath: Boolean = true,
+    val maxLength: Int = 50,
+    val separator: String = " › ",
+)
+
+/**
+ * Represents a complete layout workspace configuration.
+ *
+ * @property id Unique identifier for the workspace
+ * @property name Display name of the workspace
+ * @property description Description of the workspace
+ * @property layout The split layout configuration
+ * @property breadcrumbConfig Breadcrumb display settings
+ * @property timestamp Creation/modification timestamp
+ * @property projectPath Project path associated with this workspace
+ */
+@Immutable
+@Serializable
+data class LayoutWorkspace(
+    val id: String = "",
+    val name: String,
+    val description: String,
+    val layout: SplitConfig,
+    val breadcrumbConfig: BreadcrumbConfig = BreadcrumbConfig(),
+    val timestamp: Long = 0L,
+    val projectPath: String? = null,
+) {
+    companion object {
+        /**
+         * Generate a unique workspace ID based on current timestamp.
+         */
+        fun generateId(): String = "workspace-${Clock.System.now().toEpochMilliseconds()}"
+    }
+}
+
+/**
+ * JSON serializer for workspace configurations.
+ * Provides pretty-printed JSON output and ignores unknown keys for forward compatibility.
+ */
+object WorkspaceSerializer {
+    private val json =
+        Json {
+            prettyPrint = true
+            ignoreUnknownKeys = true
+        }
+
+    /**
+     * Serialize a workspace to JSON string.
+     */
+    fun serialize(config: LayoutWorkspace): String = json.encodeToString(config)
+
+    /**
+     * Deserialize a JSON string to a workspace.
+     */
+    fun deserialize(jsonString: String): LayoutWorkspace = json.decodeFromString(jsonString)
+}

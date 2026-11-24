@@ -1,0 +1,1231 @@
+package ai.rever.boss.plugin.browser
+
+import ai.rever.boss.config.ConfigLoader
+import ai.rever.boss.plugin.pathutils.BossDirectories
+import ai.rever.boss.utils.logging.BossLogger
+import ai.rever.boss.utils.logging.LogCategory
+import ai.rever.boss.utils.logging.LogSanitizer
+import com.teamdev.jxbrowser.browser.Browser
+import com.teamdev.jxbrowser.cookie.Cookie
+import com.teamdev.jxbrowser.cookie.SameSite
+import com.teamdev.jxbrowser.net.HttpHeader
+import com.teamdev.jxbrowser.net.callback.BeforeStartTransactionCallback
+import com.teamdev.jxbrowser.profile.Profile
+import com.teamdev.jxbrowser.time.Timestamp
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
+import java.io.File
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+import java.util.Base64
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedDeque
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
+
+/**
+ * Tracks which application window owns each plugin-created browser handle.
+ *
+ * Closing a window atomically marks it closed before draining its handles. A
+ * browser creation that finishes during teardown is therefore rejected instead
+ * of escaping cleanup and retaining the destroyed AWT window.
+ */
+internal class BrowserWindowOwnershipRegistry {
+    private data class WindowCreationState(
+        var inFlightCreates: Int = 0,
+        var closing: Boolean = false,
+    )
+
+    private val lock = Any()
+    private val ownerByBrowserId = mutableMapOf<String, String>()
+    private val creationStateByWindowId = mutableMapOf<String, WindowCreationState>()
+
+    fun tryBeginCreate(windowId: String): Boolean =
+        synchronized(lock) {
+            val state = creationStateByWindowId.getOrPut(windowId, ::WindowCreationState)
+            if (state.closing) {
+                false
+            } else {
+                state.inFlightCreates++
+                true
+            }
+        }
+
+    fun register(
+        browserId: String,
+        windowId: String,
+    ): Boolean =
+        synchronized(lock) {
+            val state = creationStateByWindowId[windowId]
+            if (state == null || state.closing) {
+                false
+            } else {
+                ownerByBrowserId[browserId] = windowId
+                true
+            }
+        }
+
+    fun finishCreate(windowId: String): Boolean =
+        synchronized(lock) {
+            val state = creationStateByWindowId[windowId] ?: return@synchronized false
+            if (state.inFlightCreates <= 0) return@synchronized false
+
+            state.inFlightCreates--
+            if (state.inFlightCreates == 0) {
+                // The closed WindowScopedBrowserService instance rejects further work.
+                // A later service created with the same ID represents a new lifecycle,
+                // so this transient state can be discarded once admitted calls drain.
+                creationStateByWindowId.remove(windowId, state)
+            }
+            true
+        }
+
+    fun unregister(browserId: String) =
+        synchronized(lock) {
+            ownerByBrowserId.remove(browserId)
+        }
+
+    fun closeWindow(windowId: String): Set<String> =
+        synchronized(lock) {
+            val state = creationStateByWindowId.getOrPut(windowId, ::WindowCreationState)
+            state.closing = true
+
+            val ownedBrowserIds = mutableSetOf<String>()
+            val owners = ownerByBrowserId.iterator()
+            while (owners.hasNext()) {
+                val (browserId, ownerWindowId) = owners.next()
+                if (ownerWindowId == windowId) {
+                    ownedBrowserIds += browserId
+                    owners.remove()
+                }
+            }
+
+            if (state.inFlightCreates == 0) {
+                creationStateByWindowId.remove(windowId, state)
+            }
+            ownedBrowserIds
+        }
+
+    fun count(windowId: String): Int =
+        synchronized(lock) {
+            ownerByBrowserId.values.count { it == windowId }
+        }
+
+    internal fun trackedWindowCount(): Int =
+        synchronized(lock) {
+            creationStateByWindowId.size
+        }
+}
+
+/**
+ * Outcome of a single browser-creation attempt. [EngineFailure] is kept distinct because only a
+ * failure inside the engine's own `newBrowser()` says anything about engine health — that call
+ * takes no URL, so nothing about the caller's request can cause one. A failure while
+ * constructing the handle, by contrast, is routinely just a bad URL.
+ */
+private sealed interface CreationOutcome {
+    data class Created(
+        val handle: BrowserHandle,
+    ) : CreationOutcome
+
+    object EngineFailure : CreationOutcome
+
+    /**
+     * The engine was replaced while this creation was in flight, so the browser it produced
+     * belongs to a closed engine. Distinct from [EngineFailure] because it is evidence about
+     * the *previous* engine, which has already been dealt with: feeding it to the wedge
+     * detector would count one wedge twice and could recycle a healthy replacement.
+     */
+    object StaleGeneration : CreationOutcome
+
+    object OtherFailure : CreationOutcome
+}
+
+// Cap on the engine's own newBrowser() call. A wedged engine can hang there rather than
+// throwing, and JxBrowser's internal main-frame timeout is 45s — long enough to read as an app
+// freeze. Comfortably above a healthy cold boot, which is well under a second.
+private const val NEW_BROWSER_TIMEOUT_MS = 20_000L
+
+/**
+ * Run the engine's own browser-creation call, time-boxed.
+ *
+ * [create] runs on a standalone scope and is consumed via `await()`, because
+ * [withTimeoutOrNull] can only abandon a blocking call if the thing it awaits is itself
+ * cancellable. `await()` is; a `withContext` block is not — it waits for its body to finish, so
+ * wrapping the blocking call directly would defeat the timeout entirely. An abandoned thread
+ * therefore drains on its own, and a browser that lands after the timeout is closed via the
+ * handoff below. [runCatching] inside keeps the deferred from ever completing exceptionally, so
+ * an abandoned failure has no one left to report to.
+ */
+private suspend fun newBrowserTimeBoxed(create: () -> Browser): Browser {
+    // Ownership handoff for the abandoned case. A browser that arrives after the timeout has
+    // nobody holding it — it never reaches activeBrowsers, so no dispose path can ever find it
+    // and its renderer process would leak until the engine is replaced. The producer parks it in
+    // [box]; whichever side observes the other having given up drains the box and closes it.
+    // getAndSet makes that exactly one side, so there is no double-close either.
+    val box = AtomicReference<Browser?>(null)
+    val abandoned = AtomicBoolean(false)
+    val creation =
+        CoroutineScope(Dispatchers.IO + SupervisorJob()).async {
+            val result = runCatching(create)
+            result.getOrNull()?.let { box.set(it) }
+            if (abandoned.get()) closeAbandoned(box)
+            result
+        }
+    val outcome = withTimeoutOrNull(NEW_BROWSER_TIMEOUT_MS) { creation.await() }
+    if (outcome == null) {
+        abandoned.set(true)
+        // Covers the interleaving where the producer stored its browser and read `abandoned`
+        // before this line ran: it saw false and left the browser parked, so we drain it.
+        closeAbandoned(box)
+        error("Engine did not return a browser within ${NEW_BROWSER_TIMEOUT_MS}ms")
+    }
+    return outcome.getOrThrow()
+}
+
+private fun closeAbandoned(box: AtomicReference<Browser?>) {
+    box.getAndSet(null)?.let { browser -> runCatching { browser.close() } }
+}
+
+/**
+ * Repairs an engine that is alive but can no longer create browsers.
+ *
+ * Kept out of [BrowserServiceImpl] because it is a self-contained concern: the policy lives in
+ * [EngineWedgeDetector], the repair lives in [FluckEngine.recycleWedgedEngine], and this object
+ * is only the wiring between them and the [FluckEngine.isEngineHealthy] signal.
+ */
+private object WedgeRecovery {
+    private val detector = EngineWedgeDetector()
+
+    /** A browser was created, so the engine is demonstrably fine. */
+    fun recordSuccess() {
+        detector.recordSuccess()
+        FluckEngine.reportWedgeUnrecoverable(false)
+    }
+
+    /**
+     * Feed an engine-level failure to the detector and, if it trips, replace the engine.
+     *
+     * @return true when a fresh engine is in place and the creation is worth retrying.
+     */
+    suspend fun recycleIfWedged(): Boolean {
+        val generation = FluckEngine.currentEngineGeneration
+        val shouldRecycle = detector.recordFailure(System.currentTimeMillis(), generation)
+        FluckEngine.reportWedgeUnrecoverable(detector.isExhausted)
+        if (!shouldRecycle) return false
+        return FluckEngine.recycleWedgedEngine(
+            "newBrowser() failed repeatedly (auto-recycle #${detector.recycleAttempts})",
+        )
+    }
+}
+
+/**
+ * Desktop implementation of [BrowserService] that wraps [FluckEngine].
+ *
+ * Provides plugins with JxBrowser functionality without exposing JxBrowser types.
+ * In addition to plain browser creation it offers optional **managed profiles**
+ * (used by automation such as RPA): an isolated profile per browser, with auth
+ * (cookie/header) seeding, ephemeral cleanup, and persistent named-profile reuse
+ * under an LRU disk cap. These are opt-in via [BrowserConfig.profileName] /
+ * [BrowserConfig.ephemeralProfile] / [BrowserConfig.auth]; general tabs leave
+ * them unset and are unaffected.
+ *
+ * Singleton, shared across all plugins.
+ */
+object BrowserServiceImpl : BrowserService {
+    private val logger = BossLogger.forComponent("BrowserServiceImpl")
+
+    // Track active browser handles for resource management
+    private val activeBrowsers = ConcurrentHashMap<String, BrowserHandleImpl>()
+
+    /**
+     * Drops handles whose browser has gone away without passing through a dispose path.
+     *
+     * A browser has three ways to die that never touch `activeBrowsers`: a plugin calling the
+     * public `BrowserHandle.dispose()` itself, a renderer crashing, and a page calling
+     * `window.close()`. There is no close subscription here to notice any of them, so the map
+     * keeps entries for browsers that no longer exist.
+     *
+     * It was briefly load-bearing, while a concurrent-browser ceiling existed, because each
+     * orphan permanently consumed a slot. The ceiling is gone (hibernation replaced it), so what
+     * remains is a wrong count and, more importantly, a leaked managed-profile reference: those
+     * are reference-counted behind a per-named-profile fence, so never releasing one leaves the
+     * fence held for the rest of the session.
+     *
+     * Called from [getActiveBrowserCountForWindow], which is the path plugins actually reach
+     * through `BrowserServiceProvider`. An earlier revision hung it off [getActiveBrowserCount]
+     * instead, which nothing in this repo calls - the reconcile never ran, so the leak this
+     * documents stayed open. Hibernation makes it matter more than it used to: a hibernated tab
+     * disposes its browser through the plugin's own handle, exactly the path that never reaches
+     * this map.
+     *
+     * View teardown remains synchronous, through [disposeTrackedBrowserBlocking], before a
+     * window can destroy its AWT peer. Native close and the same non-suspending [releaseManaged]
+     * are scheduled in host-owned work, with release following native completion. Process exit
+     * can abandon that background work; orphan profile cleanup runs on a later managed create.
+     *
+     * @return the number of live handles after pruning.
+     */
+    internal fun reconcileOrphanedBrowsers(): Int {
+        val orphans = activeBrowsers.entries.filter { !it.value.isValid }
+        for ((id, handle) in orphans) {
+            // Through the same synchronous view teardown as window disposal, not a bare map removal.
+            // An earlier version removed the entry, unregistered ownership and released the
+            // profile, but never called `handle.dispose()` - which is not a no-op for a
+            // browser whose transport is gone: it shuts its native workers, cancels
+            // its scopes, unsubscribes every JxBrowser listener and unregisters from
+            // BrowserFindController and ActiveBrowserRegistry, all host-side state that
+            // outlives a dead connection.
+            //
+            // Dropping the entry without that made the leak permanent rather than merely
+            // untidy: `disposeAllForWindow` resolves handles out of `activeBrowsers` and
+            // through `browserOwners`, so once reconcile had removed and unregistered one,
+            // window teardown could never reach it again. Pruning less thoroughly than
+            // teardown means whatever prune wins the race decides whether the resources are
+            // ever released.
+            //
+            // Caught per handle so an ownership/bookkeeping failure cannot strand later handles.
+            // View teardown and deferred native/profile failures are logged by the cleanup owner.
+            // dispose() is idempotent, so a handle that window teardown also reaches is safe.
+            try {
+                disposeTrackedBrowserBlocking(handle)
+            } catch (e: Exception) {
+                logger.warn(
+                    LogCategory.BROWSER,
+                    "Error disposing orphaned browser handle",
+                    mapOf("handleId" to id),
+                    e,
+                )
+            }
+        }
+        if (orphans.isNotEmpty()) {
+            logger.info(
+                LogCategory.BROWSER,
+                "Pruned browser handles whose browser had gone away",
+                mapOf("pruned" to orphans.size.toString(), "active" to activeBrowsers.size.toString()),
+            )
+        }
+        return activeBrowsers.size
+    }
+
+    // BrowserService is shared process-wide, but plugin handles belong to the
+    // window whose PluginContext created them.
+    private val browserOwners = BrowserWindowOwnershipRegistry()
+
+    // Managed-profile bookkeeping for handles created on an isolated profile.
+    private val managedByHandle = ConcurrentHashMap<String, ManagedRef>()
+
+    // POST bodies captured from popup handoffs, awaiting consumption by the next
+    // createBrowser call for the same URL. A FIFO queue per URL so that two
+    // popups to the same destination (e.g. clicking Print twice in OncoEMR
+    // before the first new tab finishes loading) don't clobber each other.
+    // See [stashPopupPost].
+    private val pendingPopupPosts = ConcurrentHashMap<String, ConcurrentLinkedDeque<PendingPopupPost>>()
+    private const val PENDING_POPUP_TTL_MS = 10_000L
+
+    private data class PendingPopupPost(
+        val postData: ByteArray,
+        val contentType: String,
+        val createdAtMs: Long,
+    )
+
+    override fun stashPopupPost(
+        url: String,
+        postData: ByteArray,
+        contentType: String,
+    ) {
+        val now = System.currentTimeMillis()
+        // compute (not computeIfAbsent + addLast) so the append is atomic with
+        // the queue's membership in the map. Otherwise a concurrent consume or
+        // GC that just observed an empty queue could remove the entry between
+        // computeIfAbsent returning and addLast appending — orphaning the body
+        // and reintroducing the regression this fix exists for.
+        pendingPopupPosts.compute(url) { _, existing ->
+            (existing ?: ConcurrentLinkedDeque()).also {
+                it.addLast(PendingPopupPost(postData, contentType, now))
+            }
+        }
+        // Opportunistic GC. Stash is infrequent (one call per popup), so the
+        // map walk here is cheap relative to the cost of a background sweeper.
+        gcStalePopupPosts(now)
+    }
+
+    private fun consumePopupPost(url: String): PendingPopupPost? {
+        val now = System.currentTimeMillis()
+        var entry: PendingPopupPost? = null
+        // The whole drain-and-poll runs inside compute so a racing stash for
+        // the same URL serializes on this key — preventing TOCTOU where we'd
+        // remove a queue from the map after another thread had just appended.
+        pendingPopupPosts.compute(url) { _, q ->
+            if (q == null) return@compute null
+            dropStaleHeads(q, now)
+            entry = q.pollFirst()
+            if (q.isEmpty()) null else q
+        }
+        return entry
+    }
+
+    private fun gcStalePopupPosts(now: Long) {
+        for (key in pendingPopupPosts.keys) {
+            pendingPopupPosts.compute(key) { _, q ->
+                if (q == null) return@compute null
+                dropStaleHeads(q, now)
+                if (q.isEmpty()) null else q
+            }
+        }
+    }
+
+    private fun dropStaleHeads(
+        queue: ConcurrentLinkedDeque<PendingPopupPost>,
+        now: Long,
+    ) {
+        while (true) {
+            val head = queue.peekFirst() ?: return
+            if (now - head.createdAtMs <= PENDING_POPUP_TTL_MS) return
+            queue.pollFirst()
+        }
+    }
+
+    override fun isAvailable(): Boolean =
+        try {
+            // Deliberately does NOT touch FluckEngine.engine: that getter performs
+            // the full synchronous Chromium boot, and this method gets called from
+            // browser-tab composition (the UI thread). A not-yet-initialized (or
+            // closed-and-recreatable) engine reports available — initialization
+            // happens lazily inside createBrowser, whose failure paths callers
+            // already surface with retry UI.
+            val initErr = FluckEngine.initError
+            val available = initErr == null
+            if (!available) {
+                logger.warn(
+                    LogCategory.BROWSER,
+                    "BrowserService not available",
+                    mapOf(
+                        "initError" to initErr.toString(),
+                    ),
+                )
+            }
+            available
+        } catch (e: Exception) {
+            logger.warn(
+                LogCategory.BROWSER,
+                "BrowserService not available - exception",
+                mapOf(
+                    "error" to (e.message ?: "unknown"),
+                    "errorType" to e.javaClass.simpleName,
+                ),
+            )
+            false
+        }
+
+    override suspend fun createBrowser(config: BrowserConfig): BrowserHandle? {
+        logger.error(
+            LogCategory.BROWSER,
+            "Unscoped browser creation rejected; use a window-scoped BrowserService",
+        )
+        return null
+    }
+
+    internal fun tryBeginBrowserCreation(windowId: String): Boolean = browserOwners.tryBeginCreate(windowId)
+
+    /**
+     * Internal defensive boundary used after the public provider has already
+     * rejected null or blank owner IDs. Direct callers receive an exception
+     * because creating an unowned browser would bypass window-scoped cleanup.
+     */
+    internal suspend fun createBrowserForWindow(
+        windowId: String,
+        config: BrowserConfig,
+    ): BrowserHandle? {
+        require(windowId.isNotBlank()) { "Browser owner windowId must not be blank" }
+        return createBrowserWithRetry(config, ownerWindowId = windowId)
+    }
+
+    internal fun finishBrowserCreation(windowId: String) {
+        if (!browserOwners.finishCreate(windowId)) {
+            logger.error(
+                LogCategory.BROWSER,
+                "Unbalanced browser creation finish ignored",
+                mapOf(
+                    "windowId" to windowId,
+                ),
+            )
+        }
+    }
+
+    /**
+     * Creates a browser. **Deliberately not capped.**
+     *
+     * A concurrent-browser ceiling lived here briefly and was removed, because it was the wrong
+     * bound twice over. It fired on tab *count* rather than on idleness, so it refused the tab
+     * the user had just asked for while four idle ones sat untouched. And it cannot coexist with
+     * the fluck-browser plugin's tab hibernation: a hibernated tab recreates its browser when you
+     * switch to it, so under a cap merely moving between tabs got refused. Observed with 7 tabs
+     * open - four wakes in four seconds, then "Browser limit reached" on the fifth.
+     *
+     * The memory bound is hibernation instead (see `BossResourceMode.hibernationIdleMs`), which
+     * reclaims from tabs nobody is using rather than refusing work.
+     */
+    private suspend fun createBrowserWithRetry(
+        config: BrowserConfig,
+        ownerWindowId: String,
+    ): BrowserHandle? {
+        // At most two attempts. When the first fails inside the engine's own newBrowser() and
+        // that trips the wedge detector, the engine is recycled and the creation is retried
+        // once on the replacement — so the tab opens after a ~1s blip instead of failing, which
+        // is what used to persist until the Chromium process happened to die on its own.
+        var attemptsLeft = 2
+        while (attemptsLeft-- > 0) {
+            val outcome = attemptCreateBrowser(config, ownerWindowId)
+            if (outcome is CreationOutcome.Created) {
+                WedgeRecovery.recordSuccess()
+                return outcome.handle
+            }
+            val retry =
+                when (outcome) {
+                    // A creation the recycle invalidated retries straight onto the replacement:
+                    // the engine it needed already exists, so there is nothing to repair first.
+                    is CreationOutcome.StaleGeneration -> true
+
+                    // Only an engine-level failure is worth recycling for, and only while the
+                    // detector agrees; anything else is this request's own problem and fails as
+                    // it always did.
+                    is CreationOutcome.EngineFailure -> WedgeRecovery.recycleIfWedged()
+
+                    else -> false
+                }
+            if (!retry) break
+        }
+        return null
+    }
+
+    private suspend fun attemptCreateBrowser(
+        config: BrowserConfig,
+        ownerWindowId: String,
+    ): CreationOutcome {
+        // Declared outside the try so the outer catch can release the managed profile
+        // if anything after newBrowser() throws (see the catch below).
+        var managed: ManagedRef? = null
+        var handleId: String? = null
+        var tracked = false
+        // Set only when the engine's creation call is what threw, so the caller can tell an
+        // engine-level failure from a handle-construction one. Profile seeding below sits
+        // inside the same outer try but must NOT be attributed to the engine.
+        var engineCallFailed = false
+        // Set when the engine was recycled while this creation was in flight, so the caller
+        // retries against the replacement instead of accusing it of a failure it did not have.
+        var engineRecycled = false
+        return try {
+            // Read as one step: the generation that is current when this browser is created is
+            // the only one it can honestly claim. See FluckEngine.engineWithGeneration.
+            val (engine, generation) = FluckEngine.engineWithGeneration()
+
+            // Optionally run on an isolated managed profile (ephemeral or named),
+            // seeding auth into it first. Null = the engine default profile (tabs).
+            val m = acquireManagedProfile(config)
+            managed = m
+            val browser: Browser =
+                try {
+                    m?.profile?.let { p ->
+                        if (config.auth != null) {
+                            seedAndAwait(p, config.auth)
+                        } else if (!m.ephemeral) {
+                            installHeaderCallback(p, emptyMap()) // clear stale on named
+                        }
+                    }
+                    try {
+                        newBrowserTimeBoxed { if (m != null) m.profile.newBrowser() else engine.newBrowser() }
+                    } catch (e: Throwable) {
+                        engineCallFailed = true
+                        throw e
+                    }
+                } catch (e: Throwable) {
+                    m?.let { releaseManaged(it) }
+                    managed = null // released here — don't double-release in the outer catch
+                    throw e
+                }
+
+            // newBrowser() is time-boxed at 20s and a recycle triggered by another caller's
+            // failure lands inside that window routinely. This browser belongs to the engine
+            // that was current when it was created; if that engine has since been replaced it
+            // is already closed, and every use of it from here on throws ObjectClosedException
+            // at whoever calls — a plugin crash, not a browser error. Discard it and retry.
+            //
+            // Checked before touching the browser at all, since settings() would be the first
+            // such call. Ordered after creation for a reason: a check on the way in cannot see
+            // a recycle that has not happened yet, which is the whole failure mode.
+            if (FluckEngine.currentEngineGeneration != generation) {
+                engineRecycled = true
+                // Best-effort: against a closed engine this is a no-op or a dead-IPC failure,
+                // but the browser is unreachable from any dispose path once we throw, and a
+                // recycle that closed cleanly leaves a live renderer to reclaim here.
+                runCatching { browser.close() }
+                error("Engine was recycled during browser creation (generation $generation is stale)")
+            }
+
+            // Chrome setup is not an engine creation failure and must not trigger wedge recovery.
+            installBrowserChromeOrClose(
+                browser,
+                releaseOwnership = {
+                    val failedProfile = managed
+                    managed = null // Do not release twice if the outer Exception handler runs.
+                    failedProfile?.let(::releaseManaged)
+                },
+            )
+
+            // Enable swipe navigation for touchscreen devices.
+            //
+            // Touchscreens only, and the qualifier is load-bearing: this does NOT give macOS the
+            // two-finger trackpad swipe, in either rendering mode. Measured 2026-08-28 with a
+            // build forced to OFF_SCREEN and the in-page detector disabled - no navigation. Two
+            // places in this repo used to imply otherwise (JxBrowserConfig's KDoc, and the
+            // Settings copy for the off-screen mode, which promised macOS "regains the
+            // two-finger swipe-back gesture"); both were wrong and are corrected. The trackpad
+            // gesture is detected in the page - see BrowserSwipeNavScript - so do not remove
+            // that on the strength of this line.
+            browser.settings().enableOverscrollHistoryNavigation()
+
+            // If a popup handed off a POST body for this URL (form-submit target="_blank"),
+            // consume it and replay on first navigation. Explicit config wins if set.
+            val effectiveConfig =
+                if (config.initialPostData == null && config.url.isNotBlank()) {
+                    consumePopupPost(config.url)?.let { entry ->
+                        // copy() only carries data-class constructor params, so re-apply the
+                        // post-construction managed-profile vars onto the copy — otherwise
+                        // effectiveConfig.profileName/ephemeralProfile/auth silently reset.
+                        config.copy(initialPostData = entry.postData, initialPostContentType = entry.contentType).also {
+                            it.profileName = config.profileName
+                            it.ephemeralProfile = config.ephemeralProfile
+                            it.auth = config.auth
+                        }
+                    } ?: config
+                } else {
+                    config
+                }
+
+            val handle =
+                BrowserHandleImpl(
+                    browser = browser,
+                    config = effectiveConfig,
+                    engineGeneration = generation,
+                    ownerWindowId = ownerWindowId,
+                )
+            handleId = handle.id
+            activeBrowsers[handle.id] = handle
+            m?.let {
+                managedByHandle[handle.id] = it
+                // Record named-profile meta only after a successful open.
+                if (it.namedId != null) {
+                    meta[it.namedId] = NamedMeta(it.namedId, it.profileName, it.profile.path(), System.currentTimeMillis())
+                    persistMeta()
+                }
+            }
+            tracked = true // profile lifecycle now owned by disposeBrowser (via managedByHandle)
+
+            if (!browserOwners.register(handle.id, ownerWindowId)) {
+                // The window closed while browser creation was suspended. Dispose
+                // synchronously so the handle cannot retain its destroyed AWT window.
+                disposeTrackedBrowserBlocking(handle)
+                logger.debug(
+                    LogCategory.BROWSER,
+                    "Discarded browser created for closed window",
+                    mapOf(
+                        "handleId" to handle.id,
+                        "windowId" to ownerWindowId,
+                    ),
+                )
+                return CreationOutcome.OtherFailure
+            }
+
+            logger.info(
+                LogCategory.BROWSER,
+                "Browser created via BrowserService",
+                mapOf(
+                    "handleId" to handle.id,
+                    "url" to config.url,
+                    "profile" to (managed?.profileName ?: "default"),
+                    "activeBrowsers" to activeBrowsers.size,
+                ),
+            )
+
+            CreationOutcome.Created(handle)
+        } catch (e: Exception) {
+            // A recycle landing mid-creation is expected and self-correcting - the retry above
+            // opens the tab on the replacement - so it is not reported as a failure.
+            if (engineRecycled) {
+                logger.warn(
+                    LogCategory.BROWSER,
+                    "Discarding browser from a recycled engine - retrying",
+                    mapOf("url" to config.url),
+                )
+            } else {
+                logger.error(LogCategory.BROWSER, "Failed to create browser", error = e)
+            }
+            // A throw after newBrowser() (overscroll / popup-replay / handle ctor / meta
+            // persist) is caught only here; without releasing, a NAMED profile's fence
+            // stays locked for the process lifetime (deadlock) and an EPHEMERAL profile
+            // leaks. Only release if we never reached the tracked point.
+            if (!tracked) {
+                handleId?.let {
+                    activeBrowsers.remove(it)
+                    managedByHandle.remove(it)
+                    browserOwners.unregister(it)
+                }
+                managed?.let { releaseManaged(it) }
+            }
+            when {
+                engineRecycled -> CreationOutcome.StaleGeneration
+                engineCallFailed -> CreationOutcome.EngineFailure
+                else -> CreationOutcome.OtherFailure
+            }
+        }
+    }
+
+    override suspend fun disposeBrowser(handle: BrowserHandle) {
+        activeBrowsers.remove(handle.id)
+        browserOwners.unregister(handle.id)
+
+        disposeBrowserResources(
+            dispose = handle::dispose,
+            awaitNativeClose = { (handle as? BrowserHandleImpl)?.awaitNativeDisposal() },
+            release = { managedByHandle.remove(handle.id)?.let { finishManagedProfile(it) } },
+        )
+
+        logger.debug(
+            LogCategory.BROWSER,
+            "Browser disposal requested via BrowserService",
+            mapOf(
+                "handleId" to handle.id,
+                "remainingBrowsers" to activeBrowsers.size,
+            ),
+        )
+    }
+
+    override fun getActiveBrowserCount(): Int = reconcileOrphanedBrowsers()
+
+    internal fun getActiveBrowserCountForWindow(windowId: String): Int {
+        reconcileOrphanedBrowsers()
+        return browserOwners.count(windowId)
+    }
+
+    /**
+     * Return all active browser handles for internal lookup (e.g. RPA recorder).
+     *
+     * Filtered, because callers scan this list and call through whatever it hands them: a dead
+     * handle here costs a failing IPC round trip per lookup, on paths that poll for as long as
+     * a panel stays open.
+     *
+     * Filtered rather than pruned. [reconcileOrphanedBrowsers] would also remove them, but it
+     * disposes as it goes - which blocks, marshals onto the EDT, and is the wrong thing to put
+     * on a lookup this hot. The filter alone is what makes the scan safe, and it is safe
+     * whether or not anything ever prunes; leaving the entries in place also keeps them
+     * reachable by window teardown, which is what actually owns their disposal.
+     */
+    internal fun getActiveHandles(): List<BrowserHandleImpl> = activeBrowsers.values.filter { it.isValid }
+
+    /**
+     * Dispose plugin browsers owned by one application window.
+     *
+     * Called before that window's AWT peer is destroyed. Handles owned by other
+     * windows remain active.
+     */
+    internal fun disposeAllForWindow(windowId: String) {
+        val ownedBrowserIds = browserOwners.closeWindow(windowId)
+        var requestedCount = 0
+        ownedBrowserIds.forEach { browserId ->
+            val handle = activeBrowsers[browserId] ?: return@forEach
+            try {
+                if (disposeTrackedBrowserBlocking(handle)) {
+                    requestedCount++
+                }
+            } catch (e: Exception) {
+                logger.warn(
+                    LogCategory.BROWSER,
+                    "Error disposing browser for window",
+                    mapOf(
+                        "handleId" to browserId,
+                        "windowId" to windowId,
+                    ),
+                    e,
+                )
+            }
+        }
+
+        logger.info(
+            LogCategory.BROWSER,
+            "Window browser disposal requested",
+            mapOf(
+                "windowId" to windowId,
+                "count" to requestedCount,
+            ),
+        )
+    }
+
+    private fun disposeTrackedBrowserBlocking(handle: BrowserHandleImpl): Boolean {
+        if (!activeBrowsers.remove(handle.id, handle)) return false
+
+        browserOwners.unregister(handle.id)
+        // View teardown is synchronous so it precedes destruction of the window's AWT peer.
+        // Native close and profile release remain host-owned if the renderer is still busy.
+        disposeBrowserResources(
+            dispose = handle::dispose,
+            awaitNativeClose = { handle.awaitNativeDisposal() },
+            release = { managedByHandle.remove(handle.id)?.let(::releaseManaged) },
+        )
+        return true
+    }
+
+    // =======================================================================
+    // Managed profiles (optional; used by automation/RPA). General tabs don't
+    // touch any of this — it's gated on BrowserConfig.profileName/ephemeralProfile.
+    // =======================================================================
+
+    private const val EPHEMERAL_PREFIX = "rpa-eph-"
+    private const val NAMED_PREFIX = "rpa-named-"
+    private const val COOKIE_COMMIT_TIMEOUT_MS = 2_000
+
+    private val json =
+        Json {
+            prettyPrint = true
+            ignoreUnknownKeys = true
+        }
+    private val metaDir: File by lazy { BossDirectories.resolve("rpa-profiles").also { it.mkdirs() } }
+    private val metaFile: File by lazy { File(metaDir, "meta.json") }
+
+    // Bounds the persistent named profiles only (LRU-evicted). Ephemerals are bounded
+    // by their lifecycle (deleted on dispose + reclaimed by the orphan sweep).
+    private val diskCapBytes: Long by lazy {
+        ConfigLoader.getConfig("BOSS_RPA_PROFILE_CAP_BYTES")?.toLongOrNull() ?: (2L * 1024 * 1024 * 1024)
+    }
+
+    // Immutable; updates go through replace-in-map (ConcurrentHashMap.put is atomic).
+    @Serializable
+    internal data class NamedMeta(
+        val id: String,
+        val name: String,
+        val path: String,
+        val lastUsedMs: Long,
+        val diskBytes: Long = 0,
+    )
+
+    internal fun encodeMeta(list: List<NamedMeta>): String = json.encodeToString(list)
+
+    internal fun decodeMeta(text: String): List<NamedMeta> = json.decodeFromString(text)
+
+    private val meta = ConcurrentHashMap<String, NamedMeta>()
+    private val idMutexes = ConcurrentHashMap<String, Mutex>()
+    private val inUse = ConcurrentHashMap.newKeySet<String>()
+
+    @Volatile private var loaded = false
+
+    @Volatile private var sweptOrphans = false
+
+    /** A handle's managed profile: its fence name, the JxBrowser profile, and (named only) lock + id. */
+    private class ManagedRef(
+        val profileName: String,
+        val profile: Profile,
+        val ephemeral: Boolean,
+        val namedId: String?,
+        val heldMutex: Mutex?,
+    )
+
+    /**
+     * Resolve the isolated profile for [config] (null = default profile). For a
+     * named profile this acquires the per-id fence (released on disposeBrowser),
+     * so concurrent creates on the same name serialize. Ephemeral profiles get a
+     * fresh generated name, deleted on dispose.
+     */
+    private suspend fun acquireManagedProfile(config: BrowserConfig): ManagedRef? {
+        // Plain tabs (no profile requested) skip all managed-profile machinery.
+        if (!config.ephemeralProfile && config.profileName == null) return null
+        ensureLoaded()
+        sweepOrphansOnce()
+        return when {
+            config.ephemeralProfile -> {
+                val name = EPHEMERAL_PREFIX + UUID.randomUUID().toString().replace("-", "")
+                inUse.add(name)
+                ManagedRef(name, FluckEngine.newRpaProfile(name), ephemeral = true, namedId = null, heldMutex = null)
+            }
+
+            config.profileName != null -> {
+                val namedId = config.profileName!!
+                val fence = NAMED_PREFIX + sanitize(namedId)
+                val mutex = mutexFor(namedId)
+                acquireManagedProfileLock(mutex)
+                try {
+                    inUse.add(fence)
+                    val profile =
+                        FluckEngine.findProfile(fence) ?: run {
+                            evictIfNeeded()
+                            FluckEngine.newRpaProfile(fence)
+                        }
+                    ManagedRef(fence, profile, ephemeral = false, namedId = namedId, heldMutex = mutex)
+                } catch (e: Throwable) {
+                    inUse.remove(fence)
+                    mutex.unlock()
+                    throw e
+                }
+            }
+
+            else -> {
+                null
+            }
+        }
+    }
+
+    /** Cleanup if the browser couldn't be created after the profile was acquired. */
+    private fun releaseManaged(ref: ManagedRef) {
+        inUse.remove(ref.profileName)
+        if (ref.ephemeral) {
+            try {
+                FluckEngine.deleteRpaProfile(ref.profile)
+            } catch (_: Exception) {
+            }
+        }
+        ref.heldMutex?.unlock()
+    }
+
+    /**
+     * Full end-of-life bookkeeping for a managed profile: delete if ephemeral, refresh usage and
+     * evict if named, then release the fence.
+     *
+     * Shared by [disposeBrowser] and [reconcileOrphanedBrowsers]. The reconcile path used to call
+     * [releaseManaged], which unlocks the fence but skips the `lastUsedMs`/`diskBytes` refresh -
+     * so a named profile whose browser died outside a dispose path never aged, and never became
+     * a candidate for disk eviction.
+     */
+    private suspend fun finishManagedProfile(ref: ManagedRef) {
+        inUse.remove(ref.profileName)
+        try {
+            if (ref.ephemeral) {
+                FluckEngine.deleteRpaProfile(ref.profile)
+            } else if (ref.namedId != null) {
+                meta[ref.namedId]?.let { m ->
+                    val size = withContext(Dispatchers.IO) { dirSize(File(m.path)) }
+                    meta[ref.namedId] = m.copy(lastUsedMs = System.currentTimeMillis(), diskBytes = size)
+                }
+                persistMeta()
+                evictIfNeeded()
+            }
+        } finally {
+            ref.heldMutex?.unlock()
+        }
+    }
+
+    override suspend fun seedProfile(
+        profileName: String,
+        auth: BrowserAuthSpec?,
+    ) {
+        ensureLoaded()
+        require(profileName.isNotBlank()) { "profileName must not be blank" }
+        val fence = NAMED_PREFIX + sanitize(profileName)
+        val mutex = mutexFor(profileName)
+        acquireManagedProfileLock(mutex)
+        try {
+            inUse.add(fence)
+            val profile =
+                FluckEngine.findProfile(fence) ?: run {
+                    evictIfNeeded()
+                    FluckEngine.newRpaProfile(fence)
+                }
+            if (auth != null) {
+                seedManagedProfileAuthentication(profile, auth)
+            } else {
+                installHeaderCallback(profile, emptyMap())
+            }
+            meta[profileName] = NamedMeta(profileName, fence, profile.path(), System.currentTimeMillis())
+            persistMeta()
+        } finally {
+            inUse.remove(fence)
+            mutex.unlock()
+        }
+    }
+
+    private suspend fun seedManagedProfileAuthentication(
+        profile: Profile,
+        auth: BrowserAuthSpec,
+    ) {
+        val tmp = profile.newBrowser().also { installBrowserChromeOrClose(it) }
+        try {
+            seedAndAwait(profile, auth)
+        } finally {
+            try {
+                tmp.close()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    override fun deleteProfile(profileName: String): Boolean {
+        ensureLoaded()
+        val fence = NAMED_PREFIX + sanitize(profileName)
+        val mutex = mutexFor(profileName)
+        if (!mutex.tryLock()) return false
+        try {
+            if (inUse.contains(fence)) return false
+            FluckEngine.findProfile(fence)?.let { FluckEngine.deleteRpaProfile(it) }
+            meta.remove(profileName)
+            persistMeta()
+            return true
+        } finally {
+            mutex.unlock()
+        }
+    }
+
+    override fun listProfiles(): List<BrowserProfileInfo> {
+        ensureLoaded()
+        return meta.values.map { BrowserProfileInfo(it.id, it.diskBytes, it.lastUsedMs, File(it.path).exists()) }
+    }
+
+    // ---- auth seeding (cookies + headers) ----
+
+    private suspend fun seedAndAwait(
+        profile: Profile,
+        auth: BrowserAuthSpec?,
+    ) {
+        if (auth == null) return
+        seedCookiesAndHeaders(profile, auth)
+        val expected =
+            auth.cookies
+                .filter { it.url.isNotBlank() }
+                .map { it.name }
+                .toSet()
+        if (expected.isEmpty()) return
+        val store = profile.cookieStore()
+        var waited = 0
+        while (waited < COOKIE_COMMIT_TIMEOUT_MS) {
+            val have = store.cookies().map { it.name() }.toSet()
+            if (have.containsAll(expected)) break
+            delay(100)
+            waited += 100
+        }
+        if (waited >= COOKIE_COMMIT_TIMEOUT_MS) {
+            val missing = expected - store.cookies().map { it.name() }.toSet()
+            if (missing.isNotEmpty()) {
+                logger.warn(
+                    LogCategory.BROWSER,
+                    "Cookie seeding timed out; some cookies never committed (likely a domain mismatch)",
+                    mapOf("missing" to missing.joinToString(","), "profile" to profile.name()),
+                )
+            }
+        }
+    }
+
+    private fun seedCookiesAndHeaders(
+        profile: Profile,
+        auth: BrowserAuthSpec,
+    ) {
+        val store = profile.cookieStore()
+        var set = 0
+        for (c in auth.cookies) {
+            if (c.url.isBlank()) continue
+            try {
+                val sameSite = c.sameSite.uppercase()
+                // Chromium rejects SameSite=None cookies that aren't Secure — coerce so they seed.
+                val secure = c.secure || sameSite == "NONE"
+                if (sameSite == "NONE" && !c.secure) {
+                    logger.debug(
+                        LogCategory.BROWSER,
+                        "Forcing Secure on a SameSite=None cookie (Chromium requires it)",
+                        mapOf("name" to c.name),
+                    )
+                }
+                val builder =
+                    Cookie
+                        .newBuilder(cookieDomain(c.url))
+                        .name(c.name)
+                        .value(c.value)
+                        .path(c.path.ifBlank { "/" })
+                        .secure(secure)
+                        .httpOnly(c.httpOnly)
+                if (c.expirationEpochMs > 0) builder.expirationTime(Timestamp.fromMillis(c.expirationEpochMs))
+                builder.sameSite(
+                    when (sameSite) {
+                        "NONE" -> SameSite.NONE
+                        "STRICT" -> SameSite.STRICT_MODE
+                        else -> SameSite.LAX_MODE
+                    },
+                )
+                store.set(builder.build())
+                set++
+            } catch (e: Exception) {
+                logger.warn(
+                    LogCategory.BROWSER,
+                    "Cookie rejected",
+                    mapOf("name" to c.name, "url" to LogSanitizer.maskUriParams(c.url), "error" to (e.message ?: "unknown")),
+                )
+            }
+        }
+        if (set > 0) {
+            try {
+                store.persist()
+            } catch (_: Exception) {
+            }
+        }
+
+        val headers = LinkedHashMap<String, String>()
+        headers.putAll(auth.headers)
+        auth.basicAuth?.let { ba ->
+            val enc = Base64.getEncoder().encodeToString("${ba.username}:${ba.password}".toByteArray(Charsets.UTF_8))
+            headers["Authorization"] = "Basic $enc"
+        }
+        installHeaderCallback(profile, headers)
+    }
+
+    /**
+     * (Re)install the request-header callback, replacing any from a previous run on
+     * a persistent profile. Empty [headers] = pass-through, clearing stale ones.
+     */
+    private fun installHeaderCallback(
+        profile: Profile,
+        headers: Map<String, String>,
+    ) {
+        try {
+            profile.network().set(
+                BeforeStartTransactionCallback::class.java,
+                BeforeStartTransactionCallback { params ->
+                    val merged = ArrayList(params.httpHeaders())
+                    headers.forEach { (k, v) ->
+                        merged.removeAll { it.name().equals(k, ignoreCase = true) }
+                        merged.add(HttpHeader.of(k, v))
+                    }
+                    BeforeStartTransactionCallback.Response.override(merged)
+                },
+            )
+        } catch (e: Exception) {
+            logger.warn(LogCategory.BROWSER, "Header injection failed", mapOf("error" to (e.message ?: "unknown")))
+        }
+    }
+
+    /** URL or bare host -> cookie domain (JxBrowser's Cookie.newBuilder takes a domain). */
+    internal fun cookieDomain(raw: String): String {
+        var s = raw.trim()
+        val scheme = s.indexOf("://")
+        if (scheme >= 0) s = s.substring(scheme + 3)
+        s = s.substringBefore('/').substringBefore('?').substringBefore('#') // authority
+        s = s.substringAfterLast('@') // drop userinfo (user:pass@) before the port split
+        if (s.startsWith("[")) return s.substringBefore(']') + "]" // IPv6 literal: keep through ']'
+        return s.substringBefore(':') // drop port
+    }
+
+    // ---- profile bookkeeping ----
+
+    internal fun sanitize(id: String): String = id.replace(Regex("[^A-Za-z0-9_.-]"), "_")
+
+    // One mutex per distinct named profileId, cached for the process lifetime (few/long-lived ids).
+    private fun mutexFor(id: String): Mutex = idMutexes.computeIfAbsent(id) { Mutex() }
+
+    private fun sweepOrphansOnce() {
+        if (sweptOrphans) return
+        synchronized(this) {
+            if (sweptOrphans) return
+            FluckEngine.cleanupOrphanedRpaProfiles(EPHEMERAL_PREFIX)
+            sweptOrphans = true
+        }
+    }
+
+    private fun ensureLoaded() {
+        if (loaded) return
+        synchronized(this) {
+            if (loaded) return
+            try {
+                if (metaFile.exists()) decodeMeta(metaFile.readText()).forEach { meta[it.id] = it }
+            } catch (e: Exception) {
+                logger.warn(LogCategory.BROWSER, "Could not load managed-profile metadata", error = e)
+            }
+            loaded = true
+        }
+    }
+
+    // Synchronized + atomic temp-file rename so concurrent writers can't interleave
+    // and a crash mid-write can't truncate the live meta.json.
+    @Synchronized
+    private fun persistMeta() {
+        try {
+            val tmp = File(metaDir, "meta.json.tmp")
+            tmp.writeText(encodeMeta(meta.values.toList()))
+            try {
+                Files.move(tmp.toPath(), metaFile.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+            } catch (_: Exception) {
+                Files.move(tmp.toPath(), metaFile.toPath(), StandardCopyOption.REPLACE_EXISTING)
+            }
+        } catch (e: Exception) {
+            logger.warn(LogCategory.BROWSER, "Could not persist managed-profile metadata", error = e)
+        }
+    }
+
+    /**
+     * Enforce the named-profile disk cap (LRU). Cheap gate on cached sizes; only
+     * walks the FS when over cap. A freshly-created profile caches diskBytes=0 until
+     * its first dispose refreshes it, so the cap can be transiently exceeded.
+     */
+    private suspend fun evictIfNeeded() =
+        withContext(Dispatchers.IO) {
+            try {
+                if (meta.values.sumOf { it.diskBytes } <= diskCapBytes) return@withContext
+                val candidates =
+                    meta.values.map { m ->
+                        val s = dirSize(File(m.path))
+                        meta[m.id] = m.copy(diskBytes = s)
+                        EvictCandidate(m.id, m.name, m.lastUsedMs, s)
+                    }
+                val victims = selectEvictionVictims(candidates, inUse.toSet(), diskCapBytes)
+                if (victims.isNotEmpty()) {
+                    for (id in victims) {
+                        val vm = mutexFor(id)
+                        if (!vm.tryLock()) continue
+                        try {
+                            val m = meta[id] ?: continue
+                            FluckEngine.findProfile(m.name)?.let { FluckEngine.deleteRpaProfile(it) }
+                            meta.remove(id)
+                            logger.info(LogCategory.BROWSER, "Evicted LRU managed profile", mapOf("id" to id))
+                        } finally {
+                            vm.unlock()
+                        }
+                    }
+                    persistMeta()
+                }
+            } catch (e: Exception) {
+                logger.warn(LogCategory.BROWSER, "Managed-profile eviction failed", error = e)
+            }
+        }
+
+    private fun dirSize(dir: File): Long = if (!dir.exists()) 0L else dir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
+
+    internal data class EvictCandidate(
+        val id: String,
+        val name: String,
+        val lastUsedMs: Long,
+        val sizeBytes: Long,
+    )
+
+    /**
+     * Pure LRU victim selection (engine-free, unit-tested): oldest-first, skipping
+     * in-use names, until the projected total is at/below [capBytes]. Empty when under.
+     */
+    internal fun selectEvictionVictims(
+        candidates: List<EvictCandidate>,
+        inUseNames: Set<String>,
+        capBytes: Long,
+    ): List<String> {
+        var total = candidates.sumOf { it.sizeBytes }
+        if (total <= capBytes) return emptyList()
+        val victims = mutableListOf<String>()
+        for (c in candidates.filter { it.name !in inUseNames }.sortedBy { it.lastUsedMs }) {
+            if (total <= capBytes) break
+            victims.add(c.id)
+            total -= c.sizeBytes
+        }
+        return victims
+    }
+}

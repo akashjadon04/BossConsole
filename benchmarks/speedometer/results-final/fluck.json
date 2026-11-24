@@ -1,0 +1,38 @@
+{
+  "browser": "BOSS fluck browser",
+  "host": "BOSS 9.2.63",
+  "benchmark": "Speedometer 3.1",
+  "url": "https://browserbench.org/Speedometer3.1/?startAutomatically=1&iterationCount=10",
+  "iterationCount": 10,
+  "method": "MCP browser_run_js (tab inside the BOSS host, not a separate process)",
+  "viewport": { "w": 1432, "h": 729, "dpr": 2 },
+  "note": "The fluck tab must be the active tab with BOSS frontmost for the whole run; document.hidden === true throttles requestAnimationFrame and Speedometer 3.1 measures with rAF. hidden:false was verified before each run counted here.",
+  "runs": [
+    { "run": 1, "score": 47.9, "scoreExact": 47.85975178242642, "confidenceText": "± 1.8", "delta": 1.7865403917192362, "geomeanMs": 20.953, "valid": true },
+    { "run": 2, "score": 47.5, "scoreExact": 47.54619226801429, "confidenceText": "± 0.83", "geomeanMs": 21.043391319612844, "valid": true },
+    { "run": 3, "score": 48.43, "scoreExact": 48.4329196412488, "confidenceText": "± 0.42", "geomeanMs": 20.64988049247353, "valid": true }
+  ],
+  "median": 47.9,
+  "suiteMeansMs_run1": {
+    "TodoMVC-JavaScript-ES5": 23.803,
+    "TodoMVC-JavaScript-ES6-Webpack-Complex-DOM": 23.834,
+    "TodoMVC-WebComponents": 10.127,
+    "TodoMVC-React-Complex-DOM": 20.39,
+    "TodoMVC-React-Redux": 20.788,
+    "TodoMVC-Backbone": 14.552,
+    "TodoMVC-Angular-Complex-DOM": 18.182,
+    "TodoMVC-Vue": 12.952,
+    "TodoMVC-jQuery": 61.567,
+    "TodoMVC-Preact-Complex-DOM": 7.616,
+    "TodoMVC-Svelte-Complex-DOM": 6.769,
+    "TodoMVC-Lit-Complex-DOM": 9.996,
+    "NewsSite-Next": 44.937,
+    "NewsSite-Nuxt": 35.769,
+    "Editor-CodeMirror": 15.093,
+    "Editor-TipTap": 45.768,
+    "Charts-observable-plot": 28.596,
+    "Charts-chartjs": 27.683,
+    "React-Stockcharts-SVG": 46.12,
+    "Perf-Dashboard": 25.424
+  }
+}

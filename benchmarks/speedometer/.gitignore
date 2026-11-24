@@ -1,0 +1,5 @@
+# Raw full-screen captures from run-screenshot.mjs. screencapture grabs the whole
+# display, so these can contain unrelated windows (messages, mail, other work).
+# Only the cropped score cards are safe to commit.
+*.png
+!**/cropped/*.png

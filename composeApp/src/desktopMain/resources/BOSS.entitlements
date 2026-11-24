@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Allow JIT for JxBrowser JavaScript execution -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    
+    <!-- Allow unsigned executable memory for JxBrowser -->
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    
+    <!-- Disable library validation for JxBrowser native libraries -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+    
+    <!-- Network access for browser functionality -->
+    <key>com.apple.security.network.client</key>
+    <true/>
+    <key>com.apple.security.network.server</key>
+    <true/>
+    
+    <!-- File access for code editor -->
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+
+    <!-- Removed July 2026 (issue #38): com.apple.security.cs.debugger and
+         com.apple.security.device.serial were granted with no stated reason.
+         cs.debugger lets every binary signed with this file (the app launcher plus
+         the PTY4J natives that signPty4jBinaries re-signs with it) attach to and
+         read the memory of other signed processes — a large grant for a
+         terminal/editor host. Nothing in the tree uses the JVM attach API,
+         task_for_pid, or a serial device, and the branded Chromium engine bundle
+         (chromium-branding/entitlements/*.entitlements) ships without either key,
+         so JxBrowser does not require them either. Do not add them back without
+         naming the consumer here.
+
+         For the avoidance of doubt about the sandbox argument: the remaining
+         sandbox-scoped keys below (inherit, files.user-selected.read-write,
+         network.*, device.camera, device.audio-input) are likewise inert while
+         app-sandbox is false — camera/mic prompts come from the NS*UsageDescription
+         strings in Info.plist. They are kept in case sandboxing is ever enabled;
+         cs.debugger was removed because, unlike those, it is a hardened-runtime
+         entitlement that is NOT inert. -->
+
+    <!-- App Sandbox disabled for full system access -->
+    <key>com.apple.security.app-sandbox</key>
+    <false/>
+    
+    <!-- Camera access for video conferencing -->
+    <key>com.apple.security.device.camera</key>
+    <true/>
+    
+    <!-- Microphone access for video conferencing -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+    
+    <!-- Additional entitlements for Chromium -->
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <true/>
+    
+    <!-- Allow spawning subprocesses -->
+    <key>com.apple.security.inherit</key>
+    <true/>
+
+    <!-- Platform passkeys (Touch ID) are handled natively by JxBrowser 9.3.0+ inside
+         the (branded) Chromium processes, so the app itself needs no WebAuthn
+         entitlement. Historical note: the custom in-process authenticator removed in
+         July 2026 would have required com.apple.developer.web-browser.public-key-credential
+         (Apple entitlement request YWD6D3446V) — a managed capability that must never
+         be declared here without an embedded provisioning profile, or macOS refuses
+         to launch the app. -->
+</dict>
+</plist>

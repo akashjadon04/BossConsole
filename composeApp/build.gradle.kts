@@ -1,0 +1,2564 @@
+import org.gradle.api.DefaultTask
+import org.gradle.api.file.DirectoryProperty
+import org.gradle.api.provider.ValueSource
+import org.gradle.api.provider.ValueSourceParameters
+import org.gradle.api.tasks.InputDirectory
+import org.gradle.api.tasks.Optional
+import org.gradle.api.tasks.TaskAction
+import org.gradle.process.ExecOperations
+import org.jetbrains.compose.desktop.application.dsl.TargetFormat
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
+import java.util.Properties
+import java.util.zip.ZipEntry
+import java.util.zip.ZipFile
+import java.util.zip.ZipOutputStream
+import javax.inject.Inject
+
+// Detect Windows ARM64 — microkernel modules excluded (no protoc binaries)
+val isWindowsArm64Build: Boolean =
+    run {
+        val a = System.getProperty("os.arch").lowercase()
+        val n = System.getProperty("os.name").lowercase()
+        n.contains("win") && (a == "aarch64" || a == "arm")
+    }
+
+plugins {
+    alias(libs.plugins.kotlinMultiplatform)
+    alias(libs.plugins.composeMultiplatform)
+    alias(libs.plugins.composeCompiler)
+    alias(libs.plugins.kotlinSerialization)
+    alias(libs.plugins.jxbrowser)
+}
+
+// Interface for injecting ExecOperations into tasks
+// Replaces deprecated project.exec() calls for Gradle 9.0 compatibility
+interface InjectedExecOps {
+    @get:Inject val execOps: ExecOperations
+}
+
+// Configuration-cache-compatible ValueSource for reading version properties
+abstract class VersionPropertiesValueSource : ValueSource<Properties, VersionPropertiesValueSource.Parameters> {
+    interface Parameters : ValueSourceParameters {
+        val propertiesFile: RegularFileProperty
+    }
+
+    override fun obtain(): Properties {
+        val props = Properties()
+        val file = parameters.propertiesFile.get().asFile
+        if (file.exists()) {
+            file.inputStream().use { props.load(it) }
+        }
+        return props
+    }
+}
+
+// Configuration-cache-compatible ValueSource for reading JxBrowser version from TOML
+abstract class JxBrowserVersionValueSource : ValueSource<String, JxBrowserVersionValueSource.Parameters> {
+    interface Parameters : ValueSourceParameters {
+        val tomlFile: RegularFileProperty
+    }
+
+    override fun obtain(): String {
+        val file = parameters.tomlFile.get().asFile
+        if (!file.exists()) {
+            throw GradleException("libs.versions.toml not found at ${file.absolutePath}")
+        }
+        val content = file.readText()
+        return Regex("""jxbrowser\s*=\s*"([^"]+)"""")
+            .find(content)
+            ?.groupValues
+            ?.get(1)
+            ?: throw GradleException("Could not find jxbrowser version in libs.versions.toml")
+    }
+}
+
+// Load version from properties file using configuration-cache-compatible providers
+val versionPropsFile = layout.projectDirectory.file("../version.properties")
+val versionPropsProvider =
+    providers.of(VersionPropertiesValueSource::class.java) {
+        parameters.propertiesFile.set(versionPropsFile)
+    }
+val appVersion = versionPropsProvider.map { it.getProperty("app.version", "8.8.0") }.get()
+// Base version (without prerelease suffix) for native package formats that don't support semver prereleases
+val baseVersion = appVersion.substringBefore("-")
+
+// CFBundleVersion is macOS's *build* identifier, not the marketing version
+// (CFBundleShortVersionString) — it has to change for every shipped build of a
+// given version, otherwise a re-notarized rebuild of 9.2.60 is indistinguishable
+// from the first 9.2.60 and anything keyed on it cannot tell the two apart.
+// Compose validates it as at most three non-negative integers, so "9.2.60.<n>" is
+// not expressible; we use Apple's usual convention of a plain monotonic counter:
+//   * CI release builds — BOSS_BUILD_ID. release.yml's prepare-version job computes it
+//     once per run as a seconds-since-epoch stamp and the macOS job reads it from
+//     `needs`, so every trigger (workflow_dispatch, workflow_call from
+//     promote-release.yml, and the `push: tags` production path) resolves the same
+//     expression. A clock rather than github.run_number, because run numbers are
+//     per-workflow: a called workflow's jobs belong to the CALLER's run, so promotion
+//     rebuilds would draw from promote-release's independent counter and could collide
+//     with — or sort below — a direct release. One clock means ids from every path form
+//     a single increasing sequence, which matters because Launch Services consults
+//     CFBundleVersion when disambiguating two copies of the same bundle id.
+//   * any other CI build — GITHUB_RUN_NUMBER, so at least it is not a constant.
+//   * local builds — app.build.number from version.properties. Deliberately a
+//     *stable* value so packaging tasks stay up-to-date between local runs; a
+//     timestamp here would re-sign the whole app image on every build.
+// The value is intentionally NOT derived from app.version: it is a build counter, and
+// Finder shows it as "Version 9.2.60 (1785000000)". `app.bundle.version` used to feed
+// CFBundleVersion while always equalling app.version, so it has been deleted outright
+// along with its writers (version tasks, release/release-lite/promote-release).
+// Note the tiers are walked, not `?:`-chained: an Actions expression that resolves to
+// nothing sets the variable to "" rather than leaving it unset, so a chain would stop at the
+// empty BOSS_BUILD_ID and skip GITHUB_RUN_NUMBER entirely.
+val macBundleBuildVersion: String =
+    sequenceOf("BOSS_BUILD_ID", "GITHUB_RUN_NUMBER")
+        .mapNotNull { System.getenv(it)?.trim() }
+        .firstOrNull { it.isNotEmpty() && it.all(Char::isDigit) }
+        ?: versionPropsProvider.map { it.getProperty("app.build.number", "1") }.get()
+
+// jpackage (and therefore Compose) derives CFBundleShortVersionString from
+// packageVersion, which must be a plain MAJOR.MINOR.PATCH — so a prerelease build
+// would show "9.2.60" in Finder instead of "9.2.60-beta.1". Re-declare the key
+// (the last declaration in a plist dict wins) only when a suffix is actually
+// present, so stable builds carry exactly one CFBundleShortVersionString.
+val macPrereleaseShortVersionKey: String =
+    if (appVersion != baseVersion) {
+        "<key>CFBundleShortVersionString</key><string>$appVersion</string>"
+    } else {
+        ""
+    }
+
+println("📦 Building BOSS Version: $appVersion")
+println("🔢 macOS CFBundleVersion (build id): $macBundleBuildVersion")
+
+// The file types BOSS can be made the default handler for, read from the same
+// resource the running app reads (see BossFileTypes and FileTypeCategories).
+// Feeds the generated CFBundleURLTypes / CFBundleDocumentTypes /
+// UTExportedTypeDeclarations blocks in nativeDistributions.macOS.infoPlist.
+//
+// Read through providers.fileContents, not File.readText(): a plain read at
+// configuration time is not a tracked configuration-cache input, so editing the
+// table would leave a cached configuration that still holds the old plist and an
+// app that claims types the resource no longer lists.
+val bossFileTypesJson =
+    providers
+        .fileContents(layout.projectDirectory.file("src/desktopMain/resources/boss-file-types.json"))
+        .asText
+val bossFileTypes: BossFileTypes.Table = BossFileTypes.parse(bossFileTypesJson.get())
+
+// Path to libs.versions.toml for reading JxBrowser version (single source of truth)
+val libsVersionsFile = layout.projectDirectory.file("../gradle/libs.versions.toml")
+
+// Configuration-cache-compatible provider for JxBrowser version
+// Can be overridden via -PjxBrowserVersion=X.Y.Z for CI builds (e.g., branded Chromium workflow)
+val jxBrowserVersionProvider =
+    providers.of(JxBrowserVersionValueSource::class.java) {
+        parameters.tomlFile.set(libsVersionsFile)
+    }
+val jxBrowserVersion =
+    project.findProperty("jxBrowserVersion")?.toString()
+        ?: jxBrowserVersionProvider.get()
+
+// local.properties (git-ignored) as a lazy, configuration-cache-tracked input.
+// Absent file → absent provider; callers must getOrElse/orNull.
+val localPropertiesProvider: Provider<Properties> =
+    providers
+        .fileContents(rootProject.layout.projectDirectory.file("local.properties"))
+        .asText
+        .map { text -> Properties().apply { load(text.reader()) } }
+
+// ---------------------------------------------------------------------------
+// Embedded runtime config
+//
+// The repo carries no keys: the JxBrowser license and Supabase endpoint/anon
+// key are injected at BUILD time from environment variables (CI: GitHub
+// Actions secrets) or local.properties (dev), and baked into the app as a
+// classpath resource that ConfigLoader treats as its lowest-priority source.
+// Missing values are omitted — a fork without keys still builds and runs,
+// with browser/auth features disabled at runtime.
+// ---------------------------------------------------------------------------
+val embeddedConfigKeys =
+    listOf(
+        "JXBROWSER_LICENSE_KEY",
+        "SUPABASE_URL",
+        "SUPABASE_ANON_KEY",
+        "SUPABASE_FUNCTION_URL",
+    )
+
+val generateEmbeddedConfig =
+    tasks.register("generateEmbeddedConfig") {
+        val outputDir = layout.buildDirectory.dir("generated/embeddedConfig")
+        val outputFile = outputDir.map { it.file("boss-build-config.properties") }
+
+        val keys = embeddedConfigKeys
+        val envProviders = keys.associateWith { providers.environmentVariable(it) }
+        val localProps = localPropertiesProvider
+
+        // Values come from env/local.properties, not tracked files — always regenerate.
+        outputs.upToDateWhen { false }
+        outputs.file(outputFile)
+
+        doLast {
+            val local = localProps.orNull
+            // Properties.store() so values round-trip through the Properties.load()
+            // in ConfigLoader — hand-written key=value lines would corrupt values
+            // containing backslashes or other characters load() treats specially.
+            val resolved = Properties()
+            keys.forEach { key ->
+                val value =
+                    envProviders.getValue(key).orNull
+                        ?: local?.getProperty(key)
+                        // legacy local.properties spelling for the JxBrowser key
+                        ?: "jxbrowser.license.key"
+                            .takeIf { key == "JXBROWSER_LICENSE_KEY" }
+                            ?.let { local?.getProperty(it) }
+                if (!value.isNullOrBlank()) resolved.setProperty(key, value)
+            }
+            outputFile.get().asFile.apply {
+                parentFile.mkdirs()
+                writer().use { resolved.store(it, "Generated at build time - never commit") }
+            }
+            println(
+                "🔑 Embedded config: " +
+                    keys.joinToString { k ->
+                        "$k ${if (resolved.containsKey(k)) "✓" else "✗"}"
+                    },
+            )
+        }
+    }
+
+// Task to generate Version constants from properties
+val generateVersionConstants =
+    tasks.register("generateVersionConstants") {
+        val outputDir = layout.buildDirectory.dir("generated/source/version")
+        val outputFile = outputDir.map { it.file("ai/rever/boss/utils/VersionConstants.kt") }
+
+        // Use providers for configuration cache compatibility
+        val propsProvider = versionPropsProvider
+        val majorProvider = propsProvider.map { it.getProperty("app.version.major", "8") }
+        val minorProvider = propsProvider.map { it.getProperty("app.version.minor", "8") }
+        val patchProvider = propsProvider.map { it.getProperty("app.version.patch", "0") }
+        val prereleaseProvider = propsProvider.map { it.getProperty("app.prerelease.suffix", "") }
+        val jxVersionProvider = jxBrowserVersionProvider
+
+        // Track libs.versions.toml as an input for JxBrowser version
+        inputs.file(libsVersionsFile)
+
+        inputs.file(versionPropsFile)
+        outputs.file(outputFile)
+
+        // CRITICAL: Force regeneration on every build to prevent stale version constants
+        // This prevents Issue #111 where builds had wrong version embedded in artifacts
+        outputs.upToDateWhen { false }
+
+        doLast {
+            val major = majorProvider.get()
+            val minor = minorProvider.get()
+            val patch = patchProvider.get()
+            val prerelease = prereleaseProvider.get().takeIf { it.isNotBlank() }
+            val jxVersion = jxVersionProvider.get()
+
+            // Generate PRERELEASE constant as nullable String
+            val prereleaseConstant = if (prerelease != null) "\"$prerelease\"" else "null"
+
+            outputFile.get().asFile.apply {
+                parentFile.mkdirs()
+                writeText(
+                    """
+                |package ai.rever.boss.utils
+                |
+                |/**
+                | * Auto-generated version constants from version.properties and libs.versions.toml
+                | * Do not edit this file manually - it will be regenerated on build
+                | */
+                |internal object VersionConstants {
+                |    const val MAJOR = $major
+                |    const val MINOR = $minor
+                |    const val PATCH = $patch
+                |
+                |    /** Prerelease suffix (e.g., "beta.1", "rc.2") or null for stable releases */
+                |    val PRERELEASE: String? = $prereleaseConstant
+                |
+                |    /** JxBrowser version from gradle/libs.versions.toml */
+                |    const val JXBROWSER_VERSION = "$jxVersion"
+                |}
+                |
+                    """.trimMargin(),
+                )
+            }
+        }
+    }
+
+// Bundled plugins configuration
+// Downloads the latest boss-plugin-api from GitHub releases
+// Repo: https://github.com/akashjadon04/boss-plugin-api
+
+// Task to download latest bundled plugins from GitHub releases using curl
+val downloadBundledPlugins =
+    tasks.register("downloadBundledPlugins") {
+        group = "build"
+        description = "Downloads the latest bundled plugin JARs from GitHub releases"
+
+        val destDir = layout.buildDirectory.dir("bundled-plugins")
+        outputs.dir(destDir)
+
+        // List of bundled plugins to download from GitHub releases.
+        // These are core plugins that ship with BossConsole.
+        //
+        // Declared at CONFIGURATION time, not inside doLast, so it can be a task
+        // input. As a literal inside the action it was invisible to Gradle:
+        // editing it did not invalidate anything, the task went UP-TO-DATE on a
+        // warm build directory and never ran, and the JAR of a plugin removed
+        // from the list stayed in `build/bundled-plugins` forever. Switching
+        // prepareBundledPluginsResources to Sync fixed the hop after this one;
+        // this is the hop itself. Verified: with editor-tab removed from the
+        // list and a stale JAR planted in the output directory, the task
+        // reported UP-TO-DATE and 64.7 MB shipped anyway.
+        val bundledPlugins =
+            listOf(
+                "akashjadon04/boss-plugin-api" to "boss-plugin-api",
+                // NOT terminal-tab. At 35.1 MB it is the largest thing left
+                // here, and it is the one plugin whose unbundled behaviour is
+                // not a prediction: the prefix-collision bug deleted it from
+                // every shipped build for months, the terminal worked anyway
+                // via ensureSystemPluginsInstalled(), and nobody filed a bug.
+                // Bundling it back would ship 35 MB to restore a state no
+                // user has ever been in.
+                "akashjadon04/boss-plugin-terminal" to "boss-plugin-terminal",
+                "akashjadon04/boss-plugin-fluck-browser" to "boss-plugin-fluck-browser",
+                // NOT editor-tab. It is 64.7 MB, a quarter of the whole
+                // download, and bundling buys almost nothing: the host's
+                // ensureSystemPluginsInstalled() fetches it from the
+                // plugin's latest GitHub release before load when it is not
+                // on disk, which is already how every developer build and
+                // every install of BOSS gets it (copyBundledPluginsLocal
+                // below has never copied it either). Bundling only covered a
+                // first launch with no network, and it went stale fast: the
+                // seed is frozen at BOSS build time while editor-tab shipped
+                // five releases in two days, so a bundled JAR below the
+                // host's minVersion floor is replaced on startup anyway.
+                "akashjadon04/boss-plugin-plugin-manager" to "boss-plugin-plugin-manager",
+                "akashjadon04/boss-plugin-bookmarks" to "boss-plugin-bookmarks",
+            )
+
+        inputs.property("bundledPlugins", bundledPlugins.map { (repo, prefix) -> "$repo|$prefix" })
+
+        // The real input is "the latest release of each of those repos", which
+        // Gradle cannot see. Three sibling tasks in this file opt out for the
+        // same reason. Without it a second invocation in one workspace is
+        // UP-TO-DATE: the prune below never runs and a newer release is never
+        // picked up.
+        outputs.upToDateWhen { false }
+
+        // A Provider, not a captured value: `ciProvider.orNull` below is read at
+        // EXECUTION time, and what makes that configuration-cache safe is that
+        // Gradle tracks a Provider read as an input -- not that the value was
+        // captured early. (The sibling gate on `prepareBundledPluginsResources`
+        // still uses System.getenv at configuration time; the two agree today by
+        // different mechanisms, and only that one decides whether this task is in
+        // the graph at all.)
+        //
+        // `prepareBundledPluginsResources` only routes here when CI == "true", so
+        // the release path always has it set; a developer invoking this task by
+        // hand does not.
+        val ciProvider = providers.environmentVariable("CI")
+
+        // A GitHub token, if the environment has one. Unauthenticated
+        // api.github.com is 60 requests per hour PER IP and GitHub-hosted
+        // runners share egress IPs, so five calls per build hit a 403 whose body
+        // carries no assets - which this task then reported as "No JAR asset
+        // found in release" for every plugin, twice in a row, while the same
+        // request succeeded from a laptop. Authenticated is 5,000/hour.
+        //
+        // A Provider for the same reason ciProvider is one: read at execution
+        // time and tracked by Gradle as an input. GH_TOKEN as well as
+        // GITHUB_TOKEN because that is what `gh` exports and a developer running
+        // this by hand is likely to have.
+        val githubTokenProvider =
+            providers
+                .environmentVariable("GITHUB_TOKEN")
+                .orElse(providers.environmentVariable("GH_TOKEN"))
+
+        doLast {
+            val bundledPluginsDir = destDir.get().asFile
+            bundledPluginsDir.mkdirs()
+
+            // Drop JARs belonging to no listed plugin. The per-plugin cleanup
+            // further down only fires for prefixes still in the list, so nothing
+            // ever removed the JAR of a plugin that LEFT it -- which is the whole
+            // bug above. Boundary-aware for the reason the collision fix gives:
+            // `boss-plugin-terminal` is a prefix of
+            // `boss-plugin-terminal-tab-2.5.59.jar`, so a bare startsWith would
+            // keep a de-listed terminal-tab alive under terminal's entry.
+            val listedJar =
+                bundledPlugins.map { (_, prefix) -> Regex("""^${Regex.escape(prefix)}-\d.*\.jar$""") }
+            bundledPluginsDir
+                .listFiles()
+                ?.filter { it.name.endsWith(".jar") && listedJar.none { re -> re.matches(it.name) } }
+                ?.forEach { orphan ->
+                    logger.lifecycle("🗑️  Removing JAR for a plugin no longer bundled: ${orphan.name}")
+                    orphan.delete()
+                }
+
+            for ((repo, artifactPrefix) in bundledPlugins) {
+                try {
+                    logger.lifecycle("📦 Fetching latest release for $repo...")
+
+                    // Get latest release info from GitHub API using curl.
+                    //
+                    // The status code is appended on its own last line rather
+                    // than trusted from the exit code: `curl -s` without `-f`
+                    // exits 0 on a 403, so the old call could not tell a
+                    // rate-limit body from a release. Not `-f` alone either,
+                    // because the body of the error is what says WHICH failure
+                    // it was.
+                    val apiUrl = "https://api.github.com/repos/$repo/releases/latest"
+                    val token = githubTokenProvider.orNull?.takeIf { it.isNotBlank() }
+                    val authHeader =
+                        if (token != null) listOf("-H", "Authorization: Bearer $token") else emptyList()
+                    val curlProcess =
+                        ProcessBuilder(
+                            listOf("curl", "-s", "-w", "\n%{http_code}", "-H", "Accept: application/vnd.github.v3+json") +
+                                authHeader +
+                                listOf(apiUrl),
+                        ).redirectErrorStream(true)
+                            .start()
+                    // Never log the command: it carries the token.
+                    val rawResponse = curlProcess.inputStream.bufferedReader().readText()
+                    curlProcess.waitFor()
+
+                    val httpStatus = rawResponse.substringAfterLast('\n').trim()
+                    val responseText = rawResponse.substringBeforeLast('\n')
+
+                    if (httpStatus != "200") {
+                        // Say which failure it is. All three used to print "No
+                        // JAR asset found in release", which sent the last
+                        // investigation looking for a deleted Gradle task
+                        // instead of a quota.
+                        val apiMessage =
+                            Regex(""""message"\s*:\s*"([^"]{0,200})""").find(responseText)?.groupValues?.get(1)
+                        val hint =
+                            when {
+                                httpStatus in listOf("403", "429") && token == null -> {
+                                    "rate limited and no GITHUB_TOKEN was set (60 requests/hour per IP unauthenticated)"
+                                }
+
+                                httpStatus in listOf("403", "429") -> {
+                                    "rate limited even with a token"
+                                }
+
+                                httpStatus == "401" -> {
+                                    "the token was rejected"
+                                }
+
+                                httpStatus == "404" -> {
+                                    "no release, or the repository is unreachable"
+                                }
+
+                                else -> {
+                                    "unexpected status"
+                                }
+                            }
+                        logger.warn("⚠️  GitHub API returned $httpStatus for $repo - $hint${apiMessage?.let { ": $it" } ?: ""}")
+                        continue
+                    }
+
+                    // Parse JSON to find the JAR asset
+                    val tagNameMatch = Regex(""""tag_name"\s*:\s*"([^"]+)"""").find(responseText)
+                    val tagName = tagNameMatch?.groupValues?.get(1) ?: "unknown"
+
+                    // Find the JAR download URL.
+                    //
+                    // `findAll` + the `-thin.jar` filter, not `find`: a plugin
+                    // release publishes BOTH `<prefix>-<version>.jar` (what
+                    // buildPluginJar produces, with the plugin's dependencies
+                    // bundled) and `<prefix>-<version>-thin.jar` (the module's
+                    // bare `:jar` output, which is given that classifier purely
+                    // so it stops clobbering the real one). Whichever GitHub
+                    // happens to list first won here, and for fluck-browser that
+                    // was the thin one -- every shipped bundle through 9.4.33
+                    // contains `boss-plugin-fluck-browser-1.2.24-thin.jar`,
+                    // 1 MB of a 4 MB plugin, missing everything it needs to run.
+                    //
+                    // This is exactly PluginVersionComparator.pickPluginJarUrl, which
+                    // the host uses for the same decision and which
+                    // PluginVersionComparatorTest already guards against
+                    // picking a thin JAR. The two pickers must not disagree.
+                    val jarUrl =
+                        Regex(""""browser_download_url"\s*:\s*"([^"]+${Regex.escape(artifactPrefix)}[^"]*\.jar)"""")
+                            .findAll(responseText)
+                            .map { it.groupValues[1] }
+                            .firstOrNull { !it.endsWith("-thin.jar") }
+
+                    if (jarUrl == null) {
+                        // Reached only on a 200, so this now means what it says:
+                        // the release really has no non-thin JAR for this prefix.
+                        logger.warn("⚠️  Release $tagName of $repo has no non-thin JAR asset for '$artifactPrefix'")
+                        continue
+                    }
+
+                    val jarFileName = jarUrl.substringAfterLast("/")
+                    val destFile = File(bundledPluginsDir, jarFileName)
+
+                    // Clean up other versions of THIS plugin.
+                    //
+                    // `startsWith(artifactPrefix)` is not a plugin-name boundary.
+                    // "boss-plugin-terminal" is a prefix of
+                    // "boss-plugin-terminal-tab-2.5.59.jar", and terminal is
+                    // processed one entry after terminal-tab in the list above --
+                    // so this deleted the 35 MB terminal plugin it had just
+                    // downloaded, logged it as an "old version", and finished
+                    // green. terminal-tab is absent from every shipped bundle.
+                    //
+                    // A plugin JAR is `<prefix>-<version>.jar`, so requiring the
+                    // version separator (a hyphen followed by a digit) is what
+                    // makes the prefix a boundary: "-tab-2.5.59.jar" does not
+                    // start with a digit, "-1.0.10.jar" does. A stale
+                    // `-thin.jar` still matches and is still cleaned up.
+                    //
+                    // Runs BEFORE the already-have-it check, and never touches
+                    // the file about to be kept: a directory left holding both
+                    // the real JAR and a thin one from before the previous
+                    // commit needs the thin one gone even on a no-op run.
+                    val ownVersionedJar = Regex("""^${Regex.escape(artifactPrefix)}-\d.*\.jar$""")
+                    bundledPluginsDir
+                        .listFiles()
+                        ?.filter { ownVersionedJar.matches(it.name) && it.name != jarFileName }
+                        ?.forEach { oldFile ->
+                            logger.lifecycle("🗑️  Removing old version: ${oldFile.name}")
+                            oldFile.delete()
+                        }
+
+                    // Check if we already have this version
+                    if (destFile.exists()) {
+                        logger.lifecycle("✅ $jarFileName already exists (version: $tagName)")
+                        continue
+                    }
+
+                    // Download the JAR using curl
+                    logger.lifecycle("⬇️  Downloading $jarFileName...")
+                    val downloadProcess =
+                        ProcessBuilder("curl", "-fsSL", "-o", destFile.absolutePath, jarUrl)
+                            .redirectErrorStream(true)
+                            .start()
+                    val downloadOutput =
+                        downloadProcess.inputStream
+                            .bufferedReader()
+                            .readText()
+                            .trim()
+                    val downloadExit = downloadProcess.waitFor()
+
+                    // `-f` so curl fails on a non-2xx instead of writing the
+                    // error page into the file: without it a 404 left an HTML
+                    // body at a `.jar` name, which the completeness check below
+                    // then counted as present.
+                    if (downloadExit != 0) {
+                        logger.warn("⚠️  Could not download $jarFileName from $repo (curl exit $downloadExit) $downloadOutput")
+                        destFile.delete()
+                        continue
+                    }
+
+                    logger.lifecycle("✅ Downloaded $jarFileName (version: $tagName, size: ${destFile.length()} bytes)")
+                } catch (e: Exception) {
+                    logger.warn("⚠️  Failed to download bundled plugin from $repo: ${e.message}")
+                }
+            }
+
+            // Every path out of the loop above is a warn-and-continue: a release
+            // whose GitHub call 403s, whose repo has no release yet, or whose
+            // asset regex matches nothing produces a log line and a green build.
+            // That is how a missing terminal-tab and a thin fluck-browser both
+            // shipped for months -- nothing ever asserted the directory was
+            // complete. So assert it here.
+            val landed = bundledPluginsDir.listFiles()?.map { it.name }.orEmpty()
+            val missing =
+                bundledPlugins
+                    .map { (_, artifactPrefix) -> artifactPrefix }
+                    .filter { artifactPrefix ->
+                        val versioned = Regex("""^${Regex.escape(artifactPrefix)}-\d.*\.jar$""")
+                        landed.none { versioned.matches(it) }
+                    }
+
+            if (missing.isEmpty()) {
+                logger.lifecycle("✅ All ${bundledPlugins.size} bundled plugins present")
+            } else {
+                val summary =
+                    "Bundled plugins missing after download: ${missing.joinToString(", ")} " +
+                        "(present: ${landed.sorted().joinToString(", ").ifEmpty { "none" }})"
+                // On CI this is a release about to go out without plugins it
+                // promises, which is worse than a failed build. Locally it stays
+                // a warning: a developer may legitimately have no network.
+                if (ciProvider.orNull == "true") {
+                    throw GradleException(summary)
+                } else {
+                    logger.warn("⚠️  $summary")
+                }
+            }
+        }
+    }
+
+// Task to copy bundled plugins from local build (for development)
+val copyBundledPluginsLocal =
+    tasks.register("copyBundledPluginsLocal") {
+        group = "build"
+        description = "Copies bundled plugin JARs from local build (for development), keeping only the latest version"
+
+        val bossPluginApiDir = layout.projectDirectory.dir("../../boss-plugins/boss-plugin-api/build/libs")
+        val pluginManagerDir = layout.projectDirectory.dir("../../boss-plugins/plugin-manager/build/libs")
+        val bookmarksDir = layout.projectDirectory.dir("../../boss-plugins/bookmarks/build/libs")
+        val terminalTabDir = layout.projectDirectory.dir("../../boss-plugins/terminal-tab/build/libs")
+        val terminalDir = layout.projectDirectory.dir("../../boss-plugins/terminal/build/libs")
+        val analyticsDir = layout.projectDirectory.dir("../../boss-plugins/analytics/build/libs")
+        val destDir = layout.buildDirectory.dir("bundled-plugins")
+
+        doLast {
+            val bundledPluginsDir = destDir.get().asFile
+            bundledPluginsDir.mkdirs()
+
+            // Helper to extract version from JAR filename (e.g., "boss-plugin-api-1.0.21.jar" -> "1.0.21")
+            fun extractVersion(fileName: String): String? {
+                val match = Regex(""".*-(\d+\.\d+\.\d+)\.jar$""").find(fileName)
+                return match?.groupValues?.get(1)
+            }
+
+            // Helper to compare versions (returns true if v1 > v2)
+            fun isNewerVersion(
+                v1: String,
+                v2: String,
+            ): Boolean {
+                val v1Parts = v1.split(".").mapNotNull { it.toIntOrNull() }
+                val v2Parts = v2.split(".").mapNotNull { it.toIntOrNull() }
+                for (i in 0 until maxOf(v1Parts.size, v2Parts.size)) {
+                    val p1 = v1Parts.getOrElse(i) { 0 }
+                    val p2 = v2Parts.getOrElse(i) { 0 }
+                    if (p1 > p2) return true
+                    if (p1 < p2) return false
+                }
+                return false
+            }
+
+            // Helper to copy latest JAR, removing old versions
+            fun copyLatestJar(
+                sourceDir: File,
+                artifactPrefix: String,
+            ) {
+                if (!sourceDir.exists()) {
+                    logger.warn("⚠️  Source directory not found: ${sourceDir.absolutePath}")
+                    return
+                }
+
+                // Find the latest JAR in source directory
+                val sourceJar =
+                    sourceDir
+                        .listFiles()
+                        ?.filter {
+                            it.name.startsWith(artifactPrefix) && it.name.endsWith(".jar") &&
+                                !it.name.contains("-sources") && !it.name.contains("-javadoc")
+                        }?.maxByOrNull { extractVersion(it.name) ?: "0.0.0" }
+
+                if (sourceJar == null) {
+                    logger.warn("⚠️  No $artifactPrefix JAR found in: ${sourceDir.absolutePath}")
+                    return
+                }
+
+                val sourceVersion = extractVersion(sourceJar.name) ?: "0.0.0"
+
+                // Check existing JARs in bundled-plugins directory
+                val existingJars =
+                    bundledPluginsDir.listFiles()?.filter {
+                        it.name.startsWith(artifactPrefix) && it.name.endsWith(".jar")
+                    } ?: emptyList()
+
+                // Find the latest existing version
+                val latestExisting = existingJars.maxByOrNull { extractVersion(it.name) ?: "0.0.0" }
+                val existingVersion = latestExisting?.let { extractVersion(it.name) } ?: "0.0.0"
+
+                // Only copy if source is newer or same version
+                if (isNewerVersion(existingVersion, sourceVersion)) {
+                    logger.lifecycle("⏭️  Keeping existing $artifactPrefix v$existingVersion (source has v$sourceVersion)")
+                    return
+                }
+
+                // Remove all old versions
+                existingJars.forEach { oldJar ->
+                    logger.lifecycle("🗑️  Removing old version: ${oldJar.name}")
+                    oldJar.delete()
+                }
+
+                // Copy the new JAR
+                val destFile = File(bundledPluginsDir, sourceJar.name)
+                sourceJar.copyTo(destFile, overwrite = true)
+                logger.lifecycle("✅ Copied ${sourceJar.name} (v$sourceVersion)")
+            }
+
+            // Copy boss-plugin-api
+            copyLatestJar(bossPluginApiDir.asFile, "boss-plugin-api")
+
+            // Copy plugin-manager
+            copyLatestJar(pluginManagerDir.asFile, "boss-plugin-plugin-manager")
+
+            // Copy bookmarks
+            copyLatestJar(bookmarksDir.asFile, "boss-plugin-bookmarks")
+
+            // Copy terminal-tab
+            copyLatestJar(terminalTabDir.asFile, "boss-plugin-terminal-tab")
+
+            // Copy terminal (sidebar)
+            copyLatestJar(terminalDir.asFile, "boss-plugin-terminal")
+
+            // Copy analytics (system plugin)
+            copyLatestJar(analyticsDir.asFile, "boss-plugin-analytics")
+        }
+    }
+
+// Task to copy local plugin-manager to ~/.boss/plugins for development testing
+val copyPluginManagerToDev =
+    tasks.register("copyPluginManagerToDev") {
+        group = "build"
+        description = "Copies local plugin-manager build to ~/.boss/plugins for development testing"
+
+        val pluginManagerDir = layout.projectDirectory.dir("../../boss-plugins/plugin-manager/build/libs")
+        val userHome = System.getProperty("user.home")
+        val destDir = File("$userHome/.boss/plugins")
+
+        doLast {
+            destDir.mkdirs()
+
+            val sourceDir = pluginManagerDir.asFile
+            val jarFile =
+                sourceDir
+                    .listFiles()
+                    ?.filter {
+                        it.name.startsWith("boss-plugin-plugin-manager") && it.name.endsWith(".jar") &&
+                            !it.name.contains("-sources") && !it.name.contains("-javadoc")
+                    }?.maxByOrNull { it.lastModified() }
+
+            if (jarFile != null) {
+                // Remove old versions
+                destDir
+                    .listFiles()
+                    ?.filter {
+                        it.name.startsWith("boss-plugin-plugin-manager") && it.name.endsWith(".jar")
+                    }?.forEach { oldFile ->
+                        logger.lifecycle("🗑️  Removing old version: ${oldFile.name}")
+                        oldFile.delete()
+                    }
+
+                // Copy new version
+                val destFile = File(destDir, jarFile.name)
+                jarFile.copyTo(destFile, overwrite = true)
+                logger.lifecycle("✅ Copied ${jarFile.name} to ${destDir.absolutePath}")
+
+                // Update installed.json
+                val installedJson = File(destDir, "installed.json")
+                if (installedJson.exists()) {
+                    val content = installedJson.readText()
+                    val updatedContent =
+                        content.replace(
+                            Regex("boss-plugin-plugin-manager-[0-9]+\\.[0-9]+\\.[0-9]+\\.jar"),
+                            jarFile.name,
+                        )
+                    installedJson.writeText(updatedContent)
+                    logger.lifecycle("✅ Updated installed.json to reference ${jarFile.name}")
+                }
+            } else {
+                logger.warn("⚠️  No plugin-manager JAR found in: ${sourceDir.absolutePath}")
+                logger.warn("   Build it first: cd ~/Development/Boss/boss-plugins/plugin-manager && ./gradlew build")
+            }
+        }
+    }
+
+// Task to prepare bundled plugins for app resources (used by native distributions)
+val prepareBundledPluginsResources =
+    // Sync, not Copy: Copy only ever ADDS to its destination, so a plugin
+    // dropped from the bundled list kept shipping out of a warm build
+    // directory -- the JAR stayed in bundled-plugins-resources forever and
+    // jpackage kept picking it up. Removing editor-tab from the list above
+    // appeared to do nothing until the directory was deleted by hand. CI
+    // starts clean so no release was wrong, but anyone testing a change to
+    // that list locally was reading a stale answer.
+    tasks.register<Sync>("prepareBundledPluginsResources") {
+        group = "build"
+        description = "Prepares bundled plugins in app resources structure for native distribution"
+
+        // Use local builds for development, GitHub releases for CI
+        val useLocalPlugins = System.getenv("CI") != "true"
+        if (useLocalPlugins) {
+            dependsOn(copyBundledPluginsLocal)
+        } else {
+            dependsOn(downloadBundledPlugins)
+        }
+
+        from(layout.buildDirectory.dir("bundled-plugins"))
+        into(layout.buildDirectory.dir("bundled-plugins-resources/common/bundled-plugins"))
+    }
+
+// Task to generate versioned CLI scripts from templates
+val generateVersionedCLIScripts =
+    tasks.register("generateVersionedCLIScripts") {
+        val sourceDir = layout.projectDirectory.dir("../scripts")
+        val outputDir = layout.buildDirectory.dir("generated/resources/cli")
+
+        // Use providers for configuration cache compatibility
+        val versionProvider = versionPropsProvider.map { it.getProperty("app.version", "8.8.0") }
+
+        inputs.dir(sourceDir)
+        inputs.file(versionPropsFile)
+        outputs.dir(outputDir)
+
+        // Force regeneration on every build to keep CLI version synchronized
+        outputs.upToDateWhen { false }
+
+        doLast {
+            val version = versionProvider.get()
+            val buildDate =
+                LocalDateTime.now().format(
+                    DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"),
+                )
+
+            outputDir.get().asFile.mkdirs()
+
+            sourceDir.asFile.listFiles()?.forEach { scriptFile ->
+                if (scriptFile.isFile && (scriptFile.name == "boss" || scriptFile.name.startsWith("boss."))) {
+                    val content = scriptFile.readText()
+                    val versioned =
+                        content
+                            .replace("{{VERSION}}", version)
+                            .replace("{{BUILD_DATE}}", buildDate)
+
+                    val outputFile = outputDir.get().asFile.resolve(scriptFile.name)
+                    outputFile.writeText(versioned)
+
+                    // Preserve executable permission for bash script
+                    if (scriptFile.name == "boss") {
+                        outputFile.setExecutable(true, false)
+                    }
+
+                    println("Generated versioned CLI script: ${scriptFile.name} (v$version)")
+                }
+            }
+        }
+    }
+
+repositories {
+    google()
+    mavenCentral()
+    maven("https://packages.jetbrains.team/maven/p/ij/intellij-dependencies")
+    // JetBrains IntelliJ Platform repositories for PSI code navigation
+    maven("https://www.jetbrains.com/intellij-repository/releases")
+    maven("https://cache-redirector.jetbrains.com/intellij-dependencies")
+    // NOTE: the boss-plugin-api contract is deliberately NOT resolved from any
+    // Maven registry — its distribution is store/GitHub-releases only. See
+    // plugin-platform/plugin-api-core/build.gradle.kts (fetchApiPluginJar).
+}
+
+jxbrowser {
+    // JxBrowser version from gradle/libs.versions.toml (single source of truth)
+    version = jxBrowserVersion
+}
+
+kotlin {
+    jvmToolchain(17)
+
+    // Suppress expect/actual classes beta warning (KT-61573)
+    compilerOptions {
+        freeCompilerArgs.add("-Xexpect-actual-classes")
+    }
+
+    jvm("desktop")
+
+    // Enable experimental APIs
+    sourceSets.all {
+        languageSettings.optIn("kotlin.time.ExperimentalTime")
+        languageSettings.optIn("kotlin.ExperimentalMultiplatform")
+    }
+
+    sourceSets {
+        val desktopMain =
+            getByName("desktopMain") {
+                if (isWindowsArm64Build) {
+                    // Exclude kernel/OOP source files that depend on boss-ipc (unavailable on Windows ARM64)
+                    kotlin.srcDirs.forEach { srcDir ->
+                        kotlin.exclude(
+                            "**/kernel/**",
+                            "**/plugin/remote/**",
+                            "**/plugin/OutOfProcessPluginSpawnerImpl.kt",
+                            "**/plugin/PluginStateBridge.kt",
+                        )
+                    }
+                }
+            }
+        val desktopTest = getByName("desktopTest")
+
+        // Add generated source directory to commonMain
+        commonMain {
+            kotlin.srcDir(generateVersionConstants.map { it.outputs.files.singleFile.parent })
+        }
+
+        // Add generated CLI scripts to desktopMain resources
+        // Note: srcDir needs parent directory to maintain /cli/ path structure
+        desktopMain.resources.srcDir(generateVersionedCLIScripts.map { it.outputs.files.singleFile.parentFile })
+
+        // Build-time embedded config (JxBrowser license, Supabase endpoint/key)
+        desktopMain.resources.srcDir(generateEmbeddedConfig.map { it.outputs.files.singleFile.parentFile })
+
+        commonMain.dependencies {
+            implementation(libs.compose.mp.runtime)
+            implementation(libs.compose.mp.foundation)
+            implementation(libs.compose.mp.material)
+            implementation(compose.materialIconsExtended)
+            implementation(libs.compose.mp.ui)
+            implementation(libs.compose.mp.components.resources)
+            implementation(libs.compose.mp.components.ui.tooling.preview)
+            implementation(libs.androidx.lifecycle.viewmodel)
+            implementation(libs.androidx.lifecycle.runtime.compose)
+            // NOTE: BossEditor is not a host dependency. The editor-tab plugin
+            // bundles bosseditor-compose-desktop (and its kotlin-compiler-embeddable
+            // PSI stack) privately inside its own JAR; the plugin's classloader
+            // resolves bosseditor classes from its own URLs while sharing the
+            // host's Compose runtime via parent classloader delegation.
+            // Same arrangement as BossTerm/terminal-tab (see the note below).
+            // Minimal plugin-api-core (PluginContext, DynamicPlugin, PluginManifest)
+            // Everything else comes from boss-plugin-api bundled plugin
+            implementation(projects.pluginPlatform.pluginApiCore)
+            implementation(projects.pluginPlatform.pluginUiCore)
+            implementation(projects.pluginPlatform.pluginLogging)
+            implementation(projects.pluginPlatform.pluginScrollbar)
+            implementation(projects.pluginPlatform.pluginEvents)
+            implementation(projects.pluginPlatform.pluginSearch)
+            implementation(projects.pluginPlatform.pluginWindow)
+            implementation(projects.pluginPlatform.pluginGitTypes)
+            implementation(projects.pluginPlatform.pluginRunTypes)
+            implementation(projects.pluginPlatform.pluginWorkspaceTypes)
+            implementation(projects.pluginPlatform.pluginBookmarkTypes)
+            implementation(projects.pluginPlatform.pluginIcons)
+            implementation(projects.pluginPlatform.pluginLanguageTypes)
+            implementation(projects.pluginPlatform.pluginPathUtils)
+            implementation(projects.pluginPlatform.pluginSandbox)
+
+            // Plugin management infrastructure
+            implementation(projects.pluginPlatform.pluginLoader)
+            implementation(projects.pluginPlatform.pluginRepository)
+            implementation(projects.pluginPlatform.pluginUpdater)
+            // SemanticVersion, for RetiredPlugins: satisfiesVersionFloor (from pluginUpdater)
+            // fails OPEN on a version it cannot parse, which is right for gating an update and
+            // wrong for deciding whether to delete a plugin. One pure file; pluginUpdater has
+            // it as `implementation`, so it is not transitive.
+            implementation(projects.pluginPlatform.pluginDependency)
+            // Plugin panel manager is now dynamic (loaded from boss_plugin as plugin-manager)
+
+            // Tab type plugins are now loaded dynamically from boss_plugin:
+            // - editor-tab (was plugin-tab-code-editor)
+            // - terminal-tab (was plugin-tab-terminal)
+            // - fluck-browser (was plugin-tab-chatgpt-fluck)
+
+            implementation(libs.precompose)
+//            implementation(libs.precompose.molecule)
+            implementation(libs.precompose.viewmodel)
+
+            // Decompose dependencies
+            implementation(libs.decompose)
+            implementation(libs.decompose.extensions.compose)
+            implementation(libs.decompose.extensions.compose.experimental)
+            implementation(libs.essenty.lifecycle)
+            implementation(libs.essenty.state.keeper)
+            implementation(libs.kotlinx.serialization.core)
+            implementation(libs.kotlinx.serialization.json)
+            implementation(libs.kotlinx.datetime)
+
+            // Compose Icons dependencies
+            implementation(libs.compose.icons.feather)
+            implementation(libs.compose.icons.simpleicons)
+
+            // Supabase dependencies
+            implementation(libs.supabase.postgrest)
+            implementation(libs.supabase.auth)
+            implementation(libs.supabase.realtime)
+            implementation(libs.supabase.storage)
+            implementation(libs.supabase.functions)
+        }
+        desktopMain.dependencies {
+            implementation(compose.desktop.currentOs)
+            implementation(libs.kotlinx.coroutines.swing)
+
+            // Microkernel infrastructure (optional KERNEL mode)
+            // Excluded on Windows ARM64 where protoc is unavailable
+            if (!isWindowsArm64Build) {
+                implementation(project(":boss-ipc"))
+                implementation(project(":boss-process-manager"))
+                implementation(project(":boss-ui-sdk"))
+            }
+            implementation(libs.compose.mp.components.resources)
+
+            // BossTerm is not a host dependency. The terminal-tab plugin
+            // bundles bossterm-compose privately inside its own JAR; the
+            // plugin's classloader resolves bossterm classes from its own
+            // URLs while sharing the host's Compose runtime via parent
+            // classloader delegation.
+
+            // Logging
+            implementation(libs.slf4j.api)
+            implementation(libs.slf4j.simple)
+
+            // Reads browser bookmark/login databases during import
+            implementation(libs.sqlite.jdbc)
+
+            // QR Code generation
+            implementation(libs.zxing.core)
+            implementation(libs.zxing.javase)
+
+            // JxBrowser - core API + Compose/Swing integration
+            // Platform binary (currentPlatform) excluded: BOSS downloads branded Chromium
+            // on first launch via ChromiumAutoDownloader (~86MB saved)
+            implementation("com.teamdev.jxbrowser:jxbrowser:$jxBrowserVersion")
+            implementation(jxbrowser.compose)
+            implementation(jxbrowser.swing)
+
+            // JNA for native platform API access (macOS screen capture permissions)
+            implementation(libs.jna)
+            implementation(libs.jna.platform)
+
+            // JavaCV for video recording - removed due to notarization issues
+            // implementation("org.bytedeco:javacv-platform:1.5.11")
+
+            // Ktor client for HTTP requests
+            implementation(libs.ktor.client.core)
+            implementation(libs.ktor.client.cio)
+            implementation(libs.ktor.client.content.negotiation)
+            implementation(libs.ktor.serialization.kotlinx.json)
+
+            // CLI argument parsing
+            implementation(libs.clikt)
+        }
+
+        desktopTest.dependencies {
+            implementation(kotlin("test-junit5"))
+            implementation(libs.junit.jupiter)
+            // Test-only: supabase-kt's auth exceptions carry the HttpResponse that produced
+            // them, so asserting on what a failed sign-in tells the user means minting a real
+            // response. MockEngine is the supported way to get one without a socket.
+            implementation(libs.ktor.client.mock)
+            // Test-only: runTest skips the retry backoff in virtual time, so the send loop
+            // can be driven end to end without the test actually waiting 2 seconds.
+            implementation(libs.kotlinx.coroutines.test)
+            // Compose UI testing (createComposeRule / onNodeWithText), so renderer
+            // behaviour can be asserted against a real composition instead of
+            // reasoned about. The API is JUnit 4 only; this module runs on the
+            // JUnit Platform, so the vintage engine is what actually executes
+            // those rules.
+            //
+            // Adding vintage WIDENS what runs: any pre-existing org.junit.Test in
+            // desktopTest that the platform previously ignored now executes. When
+            // it was introduced the source set held 67 test classes and 67 were
+            // executed, on all three CI platforms — nothing was silently skipped
+            // before and nothing appeared. Re-check that count if these deps
+            // change; a suite that quietly stops running is worse than no suite.
+            implementation(compose.desktop.uiTestJUnit4)
+            runtimeOnly(libs.junit.vintage.engine)
+            // Test-only: lets the suite assert the IPC proxy's skip-list stays
+            // equal to the in-process scanner's (no production coupling).
+            // Resolved by path with a presence guard, NOT the type-safe
+            // accessor: the module is excluded from the build on Windows ARM64
+            // (settings.gradle.kts — boss-ipc's protoc ships no win-arm64
+            // binaries), where the generated accessor wouldn't even compile.
+            // findProject only guards presence; the dependency itself must use
+            // project(path) string notation — passing the Project OBJECT to
+            // implementation() is an error in Gradle 10.
+            if (findProject(":plugin-platform:plugin-api-ipc") != null) {
+                implementation(project(":plugin-platform:plugin-api-ipc"))
+            }
+        }
+        // Without the IPC module (Windows ARM64) the drift test can't compile;
+        // drop it from the source set — every other platform still enforces it.
+        if (findProject(":plugin-platform:plugin-api-ipc") == null) {
+            desktopTest.kotlin.exclude("**/SkipListDriftTest.kt")
+        }
+        // Mirror of the desktopMain exclusions above: **/kernel/** and
+        // **/plugin/remote/** aren't compiled on Windows ARM64 (no boss-ipc, no
+        // boss-ui-sdk), so tests naming those types can't be either. The
+        // plugin/remote half was missed when the kernel one was added, which left
+        // RemoteWidgetRendererColorTest (it reads resolveBackgroundColor out of the
+        // excluded renderer) unable to compile on that platform.
+        if (isWindowsArm64Build) {
+            desktopTest.kotlin.exclude(
+                "**/kernel/**",
+                "**/plugin/remote/**",
+                // Not under either directory, but they assert on boss-ipc's IpcVersion, and
+                // that module is dropped from the dependency list above on this platform.
+                // Found by WindowsArm64SourceIsolationTest rather than by a build breaking.
+                "**/plugin/IpcCompatibilityTest.kt",
+                "**/plugin/PluginStoreSetupIpcGateTest.kt",
+                "**/plugin/PluginStateDeltaTest.kt",
+                // Its process registry and production ID helper belong to the excluded OOP runtime.
+                "**/plugin/PluginProcessIdTest.kt",
+                // The source-isolation guard rejects this test's IPC package import.
+                "**/run/DesktopRunnerTerminalServiceTest.kt",
+            )
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Drop the accidental ktor SERVER stack.
+//
+// BossConsole declares ktor CLIENT only (see desktopMain above). ktor-server-cio
+// and ktor-server-core arrive transitively through
+// io.github.jan-tennert.supabase:auth-kt, whose only consumer of them is
+// io.github.jan.supabase.auth.server.HttpCallback* — the localhost HTTP callback
+// used by desktop OAuth-provider / SSO sign-in (Utils_desktopKt.startExternalAuth).
+// BOSS never takes that path: it authenticates with OTP, email and passkeys, and
+// no source file outside the standalone `server/` module (not on this graph)
+// imports io.ktor.server.*. Verified with
+// `./gradlew :composeApp:dependencyInsight --configuration desktopRuntimeClasspath
+//  --dependency ktor-server-cio`.
+//
+// Keeping them was not free: 529 io.ktor.server.* classes sat in the host
+// classloader as fallback targets for any plugin that bundles its own ktor
+// server, which is exactly the material a plugin-classloader parent fallback
+// turns into a loader-constraint LinkageError.
+//
+// If BOSS ever adds OAuth-provider or SSO sign-in, delete this block — the
+// symptom would be a NoClassDefFoundError on io/ktor/server/cio/CIO.
+//
+// Blanket rather than a per-dependency exclude on purpose: auth-kt reaches this
+// graph twice, once as composeApp's own dependency and once transitively via
+// project(':plugin-platform:plugin-repository'), so an exclude attached to the
+// declaration here would only remove one of them. Consequence to know about:
+// libs.ktor.server.tests (ktor-server-test-host) needs ktor-server-core, so it
+// cannot be added to a composeApp source set while this block stands.
+//
+// Gradle has no module-name wildcard, so this list is an enumeration and cannot
+// anticipate a future ktor-server-sse / -websockets / -netty arriving by some
+// new transitive path. KtorServerAbsentFromHostTest is the drift guard: it
+// scans the classpath for io/ktor/server/ rather than for these four names, so
+// a newcomer fails CI and names itself.
+configurations.configureEach {
+    exclude(group = "io.ktor", module = "ktor-server-cio")
+    exclude(group = "io.ktor", module = "ktor-server-cio-jvm")
+    exclude(group = "io.ktor", module = "ktor-server-core")
+    exclude(group = "io.ktor", module = "ktor-server-core-jvm")
+}
+
+// ---------------------------------------------------------------------------
+// macOS code signing resolution
+//
+// Release builds sign with a "Developer ID Application" certificate. CI imports
+// that cert into a keychain; local dev machines usually don't have it. Rather
+// than hard-fail createDistributable with "Could not find certificate...", we
+// auto-skip signing when the resolved identity isn't in the keychain.
+//
+// Signing is disabled when DISABLE_MACOS_SIGNING=true is set, OR the resolved
+// Developer ID identity is not available in the keychain. CI (cert present)
+// still signs; local packageDistributionForCurrentOS just works unsigned.
+// ---------------------------------------------------------------------------
+val isMacOSHost: Boolean = System.getProperty("os.name").lowercase().contains("mac")
+
+// No identity is hardcoded: resolution is env vars, then local.properties
+// (MACOS_DEVELOPER_ID=Developer ID Application: ...), else blank → unsigned.
+val macOSDeveloperId: String =
+    System.getenv("MACOS_DEVELOPER_ID")
+        ?: System.getenv("DEVELOPER_ID")
+        ?: localPropertiesProvider.map { it.getProperty("MACOS_DEVELOPER_ID") }.orNull
+        ?: ""
+
+// Is the signing identity present in the keychain? providers.exec keeps this
+// configuration-cache compatible (a cert import invalidates the entry), and the
+// provider chain keeps it LAZY: the keychain is only scanned when something
+// actually queries the signing decision (packaging/notarization tasks), never
+// on ./gradlew run|test|help. "-" is ad-hoc signing. Lambdas capture locals,
+// not script state, so they stay config-cache serializable.
+val signingIdentityAvailableProvider: Provider<Boolean> =
+    run {
+        val devId = macOSDeveloperId
+        when {
+            !isMacOSHost -> {
+                providers.provider { false }
+            }
+
+            // Blank identity (no env var / local.properties entry) → build unsigned;
+            // without this guard contains("") below would match any keychain output.
+            devId.isBlank() -> {
+                providers.provider { false }
+            }
+
+            devId == "-" -> {
+                providers.provider { true }
+            }
+
+            else -> {
+                providers
+                    .exec {
+                        commandLine("security", "find-identity", "-v", "-p", "codesigning")
+                        isIgnoreExitValue = true
+                    }.standardOutput.asText
+                    .map { it.contains(devId) }
+            }
+        }
+    }
+
+val macOSSigningDisabledProvider: Provider<Boolean> =
+    run {
+        val onMac = isMacOSHost
+        val devId = macOSDeveloperId
+        val envDisabled = System.getenv("DISABLE_MACOS_SIGNING") == "true"
+        signingIdentityAvailableProvider.map { available ->
+            val disabled = envDisabled || (onMac && !available)
+            if (onMac && disabled && !envDisabled) {
+                println(
+                    "⚠️  macOS signing identity not found in keychain ('$devId') - building UNSIGNED. Import the cert or set MACOS_DEVELOPER_ID to sign.",
+                )
+            }
+            disabled
+        }
+    }
+
+compose.desktop {
+    application {
+        mainClass = "ai.rever.boss.MainKt"
+
+        // Enable building uber/fat JAR
+        buildTypes.release.proguard {
+            isEnabled.set(false)
+        }
+
+        // Specify JDK for native distributions - use JAVA_HOME from environment
+        // Falls back to current JVM's home directory
+        javaHome = System.getenv("JAVA_HOME") ?: System.getProperty("java.home")
+
+        // JVM arguments optimized for platform-specific runtime
+        // Build platform-specific args to avoid warnings about non-existent packages
+        val currentOs = System.getProperty("os.name").lowercase()
+        val currentArch = System.getProperty("os.arch").lowercase()
+        val isMacosArm64 = currentOs.contains("mac") && (currentArch == "aarch64" || currentArch == "arm64")
+        val platformJvmArgs =
+            buildList {
+                // Common JCEF argument
+                add("--add-opens=java.desktop/sun.awt=ALL-UNNAMED")
+
+                // macOS-specific: lwawt packages only exist on macOS
+                if (currentOs.contains("mac")) {
+                    add("--add-opens=java.desktop/sun.lwawt=ALL-UNNAMED")
+                    add("--add-opens=java.desktop/sun.lwawt.macosx=ALL-UNNAMED")
+                    add("--add-opens=java.desktop/com.apple.eawt.event=ALL-UNNAMED")
+                    // Required for native fullscreen toggling and FullScreenUtilities tracking.
+                    // Used by FullscreenBrowserWindow/WindowFocusManager; tested on Java 17+.
+                    // Falls back to a display-sized borderless overlay if unavailable.
+                    add("--add-opens=java.desktop/com.apple.eawt=ALL-UNNAMED")
+                    // NOT -Dapple.awt.application.appearance here any more. The window's
+                    // appearance follows the BOSS theme, not the OS's, and applyMacAppearanceFromTheme
+                    // sets the property from the theme before AWT starts - which overrode whatever
+                    // was set here, leaving this line describing a value that never took effect.
+                }
+
+                // Linux-specific: X11 WM_CLASS access for desktop integration
+                if (currentOs.contains("linux")) {
+                    add("--add-opens=java.desktop/sun.awt.X11=ALL-UNNAMED")
+                }
+
+                // Bound the heap instead of letting ergonomics scale it with installed RAM.
+                //
+                // With no -Xmx at all the ceiling is a property of the user's machine rather
+                // than of BOSS: measured, 2 GB on an 8 GB Windows box and 29.97 GB on a 128 GB
+                // Mac. That is not a footprint problem, because G1 commits lazily - a loaded
+                // session measured 299 MB live inside 432 MB committed, about 12% of the
+                // process RSS. It is a blast-radius problem. An unbounded ceiling lets a leak
+                // reach tens of gigabytes of real memory before the JVM will even consider an
+                // OutOfMemoryError, and well before that point Chromium's PartitionAlloc, which
+                // shares this process's malloc, aborts outright with no catchable exception and
+                // no heap dump. A bounded heap turns a machine-wide stall into a diagnosable
+                // crash, and makes GC behaviour and crash reports comparable between users.
+                //
+                // 2 GB, from measurement rather than taste. Eleven independent readings of this
+                // app's live heap - ten crash reports spanning several released versions plus a
+                // running session - peak at 478 MB and average under 300 MB. 2 GB is over 4x
+                // that. It is also not a new number: 25% of 8 GB is exactly what every machine
+                // at or below the Ultra Lite threshold already runs with today, so if it were
+                // too small for real work, the smallest supported configuration would already
+                // be failing on it.
+                //
+                // Expressed as a flat -Xmx because no static flag pair can say
+                // min(percentage, ceiling), and jpackage bakes java-options in as fixed strings
+                // with no hook to compute one per machine. -XX:MaxRAM was tried for this and is
+                // wrong: it *replaces* the physical-memory figure rather than capping it, so
+                // -XX:MaxRAM=16g -XX:MaxRAMPercentage=25 hands an 8 GB machine a 4 GB heap,
+                // half its RAM. Verified on a 128 GB host, where -XX:MaxRAM=512g yields a
+                // 128 GB MaxHeapSize.
+                //
+                // Machines above 8 GB come down to this ceiling; machines below it (a 4 GB box
+                // gets 1 GB today) come up to it. That second direction is the one to revisit
+                // if a very small machine ever reports heap trouble.
+                add("-Xmx2g")
+
+                // Start small and let G1 grow into that ceiling, rather than committing it all
+                // at launch.
+                //
+                // Not optional alongside the -Xmx above, and the reason is a trap. The default
+                // InitialHeapSize is 1/64 of physical RAM, which on a 128 GB machine is 2 GB -
+                // exactly the ceiling just set. An -Xms equal to -Xmx tells G1 the heap is fixed,
+                // so it commits the whole 2 GB at startup and never uncommits. Measured, today's
+                // uncapped JVM starts at that same 2 GB and *shrinks* to a 432 MB commit once the
+                // app settles; without this line the cap would have frozen it at 2 GB and added
+                // roughly 1.6 GB of resident memory to every large machine, which is the opposite
+                // of the intent. Small machines were never affected (1/64 of 8 GB is 128 MB).
+                //
+                // 256 MB rather than something nearer the ~300-480 MB steady state, because the
+                // cost of guessing low is a few cheap region expansions during startup and the
+                // cost of guessing high is committed memory the app may never use.
+                add("-Xms256m")
+
+                // Apple Silicon JIT compatibility flags (harmless on other platforms)
+                add("-XX:+IgnoreUnrecognizedVMOptions")
+
+                // macOS ARM64: Delay C2 JIT to avoid crash during JxBrowser native library loading
+                // The C2 compiler conflicts with Rust allocator in libipc.dylib at startup (issue #476).
+                // Use minimal delay - just enough to let JxBrowser initialize before C2 kicks in.
+                // Defaults are ~1500/1500/40000 - we use slightly higher to avoid startup crash.
+                if (isMacosArm64) {
+                    add("-XX:Tier4CompileThreshold=2000") // Slight delay (default ~1500)
+                    add("-XX:Tier4InvocationThreshold=2000") // Slight delay (default ~1500)
+                    add("-XX:Tier4BackEdgeThreshold=10000") // Reduced from 50000 (default ~40000)
+                }
+            }
+        jvmArgs(*platformJvmArgs.toTypedArray())
+
+        // Bake Supabase config into the packaged app launcher so the shared Supabase
+        // client AND the self-updater use the CI-provided values at runtime (via
+        // ConfigLoader's system-property lookup, which outranks the hardcoded
+        // SupabaseClientConfig fallback — see issue #33). CI supplies these via env from
+        // repo secrets (release.yml top-level env); local `./gradlew run` leaves them
+        // unset and uses the run-task systemProperty block / config defaults. The anon
+        // key is the public, RLS-gated key.
+        System.getenv("SUPABASE_ANON_KEY")?.takeIf { it.isNotBlank() }?.let { jvmArgs("-DSUPABASE_ANON_KEY=$it") }
+        System.getenv("SUPABASE_URL")?.takeIf { it.isNotBlank() }?.let { jvmArgs("-DSUPABASE_URL=$it") }
+        System.getenv("SUPABASE_FUNCTION_URL")?.takeIf { it.isNotBlank() }?.let { jvmArgs("-DSUPABASE_FUNCTION_URL=$it") }
+
+        nativeDistributions {
+            targetFormats(
+                TargetFormat.Dmg, // macOS
+                TargetFormat.Msi, // Windows
+                TargetFormat.Deb, // Linux - Ubuntu/Debian
+                TargetFormat.Rpm, // Linux - RHEL/Fedora
+                // Removed AppImage - not working reliably
+                // JAR distribution handled separately via createExecutableJar task
+            )
+            packageName = "BOSS"
+
+            // Include bundled plugins in the distribution
+            // These are system plugins that ship with BossConsole
+            appResourcesRootDir.set(layout.buildDirectory.dir("bundled-plugins-resources"))
+
+            // Note: Bundled plugins will be copied to bundled-plugins/ directory
+            // inside the app resources during the build process
+            // Use base version (without prerelease suffix) for native packages
+            // DMG and MSI don't support semver prerelease suffixes like "-beta.1"
+            packageVersion = baseVersion
+            description = "Business Operating System Service - Intelligent service automation platform"
+            copyright = "© 2024 Akash Jadon All rights reserved."
+            vendor = "Akash Jadon"
+
+            // Bundle a self-contained JVM that can run the app and nothing else.
+            //
+            // This was `includeAllModules = true`, which jlinks the ENTIRE JDK into
+            // every package. That is not "a complete JVM" in any sense a user
+            // benefits from -- it is a JVM plus the toolchain for producing Java
+            // software, shipped to people who are running an app. The bundled
+            // runtime carried javadoc, jshell, the JDI debugger, jdeps, jlink,
+            // jpackage itself, the HotSpot serviceability agent and the JDWP
+            // debug agent -- none of which any code path in BOSS can reach,
+            // because the tools that use them are command-line entry points and
+            // jpackage strips `bin/` from the image anyway.
+            //
+            // Measured on macOS arm64 (`./gradlew :composeApp:createRuntimeImage`,
+            // `du -sh composeApp/build/compose/tmp/main/runtime`):
+            //
+            //     includeAllModules = true    141 MB
+            //     tooling dropped             124 MB   (-17 MB)
+            //     jdk.localedata dropped       91 MB   (-50 MB)
+            //
+            // The list below is the module set the old image actually contained,
+            // minus that tooling. It is deliberately NOT a jdeps-minimal list:
+            // jdeps only sees static references, so a minimal list silently drops
+            // whatever is reached through ServiceLoader or reflection (crypto
+            // providers, charsets, the zip filesystem, JNDI backends) and the
+            // failure shows up at runtime on a user's machine, not in CI.
+            //
+            // `java.se` is the aggregator for every `java.*` module, so no
+            // platform API can go missing here -- only `jdk.*` implementation
+            // modules are enumerated, and only ones with a runtime consumer.
+            includeAllModules = false
+            modules(
+                // Every java.* module, as one aggregator. Costs a few unused
+                // modules (java.rmi, java.transaction.xa) and buys the guarantee
+                // that nothing in the platform API disappears.
+                "java.se",
+                // Not part of java.se. Kept because the passkey/credential paths
+                // probe for smartcard providers.
+                "java.smartcardio",
+                // Screen-reader support on Windows and Linux.
+                "jdk.accessibility",
+                // Attaching to a JVM: the performance/diagnostics MCP tools and
+                // the plugin host supervisor. jdk.internal.jvmstat is its backend.
+                "jdk.attach",
+                "jdk.internal.jvmstat",
+                // Non-ASCII charsets. A terminal emulator and an editor both
+                // decode files in encodings outside the java.base default set.
+                "jdk.charsets",
+                // javac. Kept conservatively: the editor-tab plugin embeds the
+                // Kotlin compiler, whose Java-interop path can ask for
+                // ToolProvider.getSystemJavaCompiler(). Dropping this module
+                // (and the 7.9 MB lib/ct.sym that rides with it) is worth another
+                // 14 MB once Kotlin analysis in the editor is confirmed to work
+                // without it.
+                "jdk.compiler",
+                // TLS. Both are ServiceLoader-discovered security providers, so
+                // nothing references them statically -- exactly the class of
+                // module a jdeps-minimal list would drop.
+                "jdk.crypto.cryptoki",
+                "jdk.crypto.ec",
+                // Dynamic call sites (jsr223 / invokedynamic linkage).
+                "jdk.dynalink",
+                // com.sun.net.httpserver -- the local MCP endpoint and the OAuth
+                // loopback listener.
+                "jdk.httpserver",
+                // Flight Recorder, and the JMX/JFR management surface behind the
+                // performance snapshot tools.
+                "jdk.jfr",
+                "jdk.management",
+                "jdk.management.agent",
+                "jdk.management.jfr",
+                // JavaScript <-> JVM bridging for the embedded browser.
+                "jdk.jsobject",
+                // JNDI backends, reached by name, never by reference.
+                "jdk.naming.dns",
+                "jdk.naming.rmi",
+                // Socket options and mmap modes used by the IPC layer.
+                "jdk.net",
+                "jdk.nio.mapmode",
+                // RandomGenerator implementations beyond java.util.Random.
+                "jdk.random",
+                // JAAS login modules, also ServiceLoader-discovered.
+                "jdk.security.auth",
+                "jdk.security.jgss",
+                // sun.misc.Unsafe -- netty and protobuf both require it.
+                "jdk.unsupported",
+                "jdk.unsupported.desktop",
+                // org.w3c.dom.* extensions used by the XML paths.
+                "jdk.xml.dom",
+                // The zip FileSystemProvider. Plugin jars are read through it,
+                // and it is discovered by ServiceLoader.
+                "jdk.zipfs",
+                // NOT included: jdk.localedata, 33 MB of CLDR data for locales
+                // this app has no text in. See the commit that removed it for
+                // the exact blast radius (three date labels).
+            )
+
+            windows {
+                menuGroup = "BOSS"
+                upgradeUuid = "8a5a7659-2e0f-41bd-bbbb-3140b1e7dd7d"
+
+                // Use Windows ICO format for proper MSI icon display
+                iconFile.set(project.file("src/desktopMain/resources/boss_icon.ico"))
+
+                // Windows code signing is handled by external tools (signtool.exe)
+                // Configuration for MSI signing is done in the CI/CD pipeline
+
+                // Configure Windows to accept command line arguments for deep links
+                // The protocol registration is handled at runtime by WindowsProtocolHandler
+                console = false // Don't show console window
+                dirChooser = true // Allow user to choose install directory
+                perUserInstall = true // Install per-user to avoid admin requirements
+                shortcut = true // Create desktop shortcut
+                menu = true // Add to Start Menu
+            }
+
+            linux {
+                packageName = "boss"
+                debMaintainer = "support@risalabs.ai"
+                menuGroup = "Development"
+                appCategory = "Utility"
+                shortcut = true
+                iconFile.set(project.file("src/desktopMain/resources/boss_icon.png"))
+                // RPM-specific options
+                rpmLicenseType = "LGPL-3.0"
+                appRelease = "1"
+            }
+
+            macOS {
+                bundleID = "ai.rever.boss"
+                iconFile.set(project.file("src/desktopMain/resources/boss_icon.icns"))
+                packageName = "BOSS"
+                // Use base version (without prerelease suffix) for DMG - doesn't support semver prereleases
+                dmgPackageVersion = baseVersion
+                // Same build id as the app bundle. It was hardcoded "1", which is inert
+                // today (packageDmg runs against --app-image, so CFBundleVersion comes
+                // from createDistributable's generic packageBuildVersion) — but that is
+                // exactly the "correct by accident of plugin internals" the rest of this
+                // block removes: if the DMG task ever rewrote the plist, the shipped
+                // CFBundleVersion would silently revert to 1.
+                dmgPackageBuildVersion = macBundleBuildVersion
+
+                // Real platform floor, not the app's own floor: the browser-engine
+                // bundle BOSS downloads (~/.boss/boss-chromium/BOSS.app) declares
+                // LSMinimumSystemVersion 13.0 and its framework is built with
+                // LC_BUILD_VERSION minos 13.0. On an older macOS the app installed and
+                // launched fine and then died in dyld the first time an engine
+                // loaded — a broken browser tab instead of "unsupported OS".
+                // Declaring 13.0 makes Launch Services refuse to *launch* on an older
+                // OS with a clear message ("requires macOS 13.0 or later"); a DMG has
+                // no installer, so nothing gates dragging it to /Applications. The
+                // failure moves to first launch instead of into dyld. Keep in lockstep
+                // with chromium-branding / the engine bundle's LSMinimumSystemVersion:
+                // JxBrowser 9.4.0 (Chromium 151) dropped macOS 12, raising this from 12.0.
+                minimumSystemVersion = "13.0"
+
+                // Was jpackage's placeholder "Unknown" (Compose's default when this
+                // is unset), which leaves Launchpad/Finder categorization empty.
+                // BOSS is a terminal + editor + console for developers.
+                appCategory = "public.app-category.developer-tools"
+
+                // CFBundleVersion — see macBundleBuildVersion above. Set through the
+                // DSL (not infoPlist.extraKeysRawXml) so exactly one CFBundleVersion
+                // key ends up in Info.plist.
+                packageBuildVersion = macBundleBuildVersion
+
+                // Note: bundleJRE is not a valid property in current Compose Desktop
+                // The JVM is automatically bundled when creating native distributions
+                // See the modules() list above for which JVM modules go into it
+
+                // Code signing configuration
+                signing {
+                    // Sign unless explicitly disabled or no identity is available in the
+                    // keychain. Provider-typed so the keychain scan only runs when a
+                    // packaging task actually reads `sign`.
+                    sign.set(macOSSigningDisabledProvider.map { !it })
+                    identity.set(macOSDeveloperId)
+
+                    // Debug logging (keychain lookup + final decision resolve lazily
+                    // when packaging queries them; the UNSIGNED warning prints then)
+                    println("🔐 macOS Code Signing Configuration:")
+                    println("   DISABLE_MACOS_SIGNING: ${System.getenv("DISABLE_MACOS_SIGNING")}")
+                    println("   Identity: $macOSDeveloperId")
+                }
+
+                // Entitlements
+                entitlementsFile.set(project.file("src/desktopMain/resources/BOSS.entitlements"))
+
+                // Extra Info.plist keys.
+                //
+                // Only keys Compose does NOT already emit belong here: LSMinimumSystemVersion,
+                // LSApplicationCategoryType, CFBundleShortVersionString, CFBundleVersion,
+                // NSHighResolutionCapable and NSSupportsAutomaticGraphicsSwitching are all
+                // written by the Compose plugin from the DSL settings above. Declaring them
+                // again produced a plist with duplicate keys that only worked because the
+                // last declaration wins — the single-source DSL settings replace that.
+                infoPlist {
+                    // The URL schemes, document types and exported UTIs are
+                    // GENERATED from src/desktopMain/resources/boss-file-types.json
+                    // by buildSrc/BossFileTypes, not written here.
+                    //
+                    // What used to be here was one document type - public.html and
+                    // public.url, role Viewer - so BOSS could not be made the
+                    // default for a .md, a .sh or any of the 83 extensions its
+                    // editor has a lexer for. Launch Services can only make an app
+                    // the default for a *type*, and 41 of those extensions have no
+                    // system UTI at all, so the app has to export its own. That is
+                    // 28 document types and 24 exported types: generated, because
+                    // hand-writing it guarantees it drifts from EditorLanguages,
+                    // and a drift means BOSS agreeing to open a file it cannot
+                    // highlight or refusing one it can.
+                    //
+                    // Concatenated rather than interpolated into a trimIndent
+                    // block: trimIndent runs after interpolation and would
+                    // re-indent the generated XML by its own first line, which is
+                    // how a generated plist ends up with a mangled prolog.
+                    val staticKeys =
+                        """
+                        $macPrereleaseShortVersionKey
+                        <key>NSCameraUsageDescription</key>
+                        <string>BOSS needs access to your camera for video conferencing and screen sharing.</string>
+                        <key>NSMicrophoneUsageDescription</key>
+                        <string>BOSS needs access to your microphone for video conferencing and voice communication.</string>
+                        <key>NSBluetoothAlwaysUsageDescription</key>
+                        <string>BOSS uses Bluetooth to let you sign in with a passkey stored on your phone or tablet.</string>
+                        <key>NSBluetoothPeripheralUsageDescription</key>
+                        <string>BOSS uses Bluetooth to let you sign in with a passkey stored on your phone or tablet.</string>
+                        """.trimIndent()
+
+                    extraKeysRawXml =
+                        listOf(
+                            staticKeys,
+                            BossFileTypes.urlTypesXml(bossFileTypes, ownScheme = "boss", urlName = "ai.rever.boss"),
+                            BossFileTypes.documentTypesXml(bossFileTypes),
+                            BossFileTypes.exportedTypesXml(bossFileTypes),
+                        ).filter { it.isNotBlank() }.joinToString("\n")
+                }
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Application Run Tasks with Environment Configuration
+// ============================================================================
+
+// Simple wrapper task to run with local Supabase configuration
+tasks.register("runLocal") {
+    group = "application"
+    description = "Run desktop application with local Supabase configuration (localhost:54321)"
+    dependsOn("run")
+}
+
+// Simple wrapper task to run with production Supabase configuration
+tasks.register("runProduction") {
+    group = "application"
+    description = "Run desktop application with production Supabase configuration (api.risaboss.com)"
+    dependsOn("run")
+}
+
+// Configure all JavaExec tasks with boss.log.level from gradle.properties
+// Also enable dev mode so ./gradlew run uses ~/.boss_debug (not ~/.boss)
+tasks.withType<JavaExec>().configureEach {
+    val bossLogLevel = project.findProperty("boss.log.level") as? String
+    if (bossLogLevel != null) {
+        systemProperty("boss.log.level", bossLogLevel)
+    }
+    systemProperty("boss.dev.mode", "true")
+    // Dev runs are unbundled, so macOS shows the bare process/version (e.g. in the
+    // Screen Recording list). Name the AWT app "BOSS" as a best-effort; the packaged
+    // BOSS.app already reports "BOSS" via its bundle CFBundleName.
+    systemProperty("apple.awt.application.name", "BOSS")
+}
+
+// Configure run task based on which wrapper task will execute
+// This runs after task graph is built but before execution
+gradle.taskGraph.whenReady {
+    if (gradle.taskGraph.hasTask(":composeApp:runLocal")) {
+        println("🏠 Running BOSS with LOCAL Supabase configuration")
+        println()
+        println("Configuration:")
+        println("  SUPABASE_URL: http://localhost:54321")
+        println("  SUPABASE_ANON_KEY: sb_publishable_ACJWlzQHlZjBrEguHvfOxg_3BJgxAaH")
+        println("  SUPABASE_FUNCTION_URL: http://localhost:54321/functions/v1")
+        println("  (System properties will override local.properties)")
+        println()
+
+        tasks.named<JavaExec>("run") {
+            systemProperty("SUPABASE_URL", "http://localhost:54321")
+            systemProperty("SUPABASE_ANON_KEY", "sb_publishable_ACJWlzQHlZjBrEguHvfOxg_3BJgxAaH")
+            systemProperty("SUPABASE_FUNCTION_URL", "http://localhost:54321/functions/v1")
+        }
+    } else if (gradle.taskGraph.hasTask(":composeApp:runProduction")) {
+        println("☁️  Running BOSS with PRODUCTION Supabase configuration")
+        println()
+        println("Configuration:")
+        println("  SUPABASE_URL: https://api.risaboss.com")
+        println("  SUPABASE_FUNCTION_URL: https://api.risaboss.com/functions/v1")
+        println("  (System properties will override local.properties)")
+        println()
+
+        tasks.named<JavaExec>("run") {
+            systemProperty("SUPABASE_URL", "https://api.risaboss.com")
+            // The anon key is deliberately NOT hardcoded (public repo). It
+            // resolves at runtime: SUPABASE_ANON_KEY env var, local.properties,
+            // or the build-time embedded config resource.
+            systemProperty("SUPABASE_FUNCTION_URL", "https://api.risaboss.com/functions/v1")
+        }
+    }
+}
+
+// Extract JCEF natives
+tasks.register("extractJcefNatives") {
+    // Declare provider at configuration time for configuration cache compatibility
+    val jcefNativeDirProvider = layout.buildDirectory.dir("jcef-natives")
+
+    // Declare outputs for up-to-date checking
+    outputs.dir(jcefNativeDirProvider)
+    outputs.cacheIf { true }
+
+    doLast {
+        // Access provider value at execution time
+        val jcefNativeDir = jcefNativeDirProvider.get().asFile
+        jcefNativeDir.mkdirs()
+
+        // The jcefmaven library will download natives automatically
+        // We just need to ensure the directory exists
+        println("JCEF natives directory: ${jcefNativeDir.absolutePath}")
+    }
+}
+
+// Remove natives for platforms this package will never run on.
+//
+// Two third-party jars ship every platform's binaries in a single artifact and
+// leave it to the loader to pick one at runtime. That is the right call for a
+// library on Maven Central and the wrong one for a jar inside a signed, per-
+// platform desktop bundle, where the other platforms' copies are bytes every
+// user downloads, stores and code-signs for nothing.
+//
+//   skiko-awt-runtime-macos-arm64  publishes BOTH macOS dylibs (arm64 + x64) in
+//     the artifact named for arm64. The Compose plugin extracts the one this
+//     build needs to `app/libskiko-macos-arm64.dylib` and removes it from the
+//     jar -- leaving the jar holding nothing but the 22 MB x86_64 dylib, which
+//     an arm64-only bundle can never load. 9.4 MB of the packaged app.
+//
+//   sqlite-jdbc  ships ~20 builds: Linux ppc64/riscv64/armv6/armv7/x86/musl,
+//     FreeBSD, Windows x86/arm, and both Macs. Exactly one is loadable in any
+//     given package; the other ~10 MB is dead in all of them.
+//
+// This runs on the built app image, before the macOS re-sign in
+// extractCLIToAppResources, so the signature covers the trimmed jars.
+tasks.register("stripForeignPlatformNatives") {
+    description = "Strips other platforms' native binaries out of skiko and sqlite-jdbc in the app image"
+    group = "build"
+
+    // Configuration cache: capture everything the action needs at configuration
+    // time. The doLast lambda must not reach the enclosing script object nor
+    // call Task.project at execution time -- same rule as extractCLIToAppResources.
+    val appDirProvider = layout.buildDirectory.dir("compose/binaries/main/app")
+    val osName = System.getProperty("os.name").lowercase()
+    val osArch = System.getProperty("os.arch").lowercase()
+
+    // The build host is the target: Compose packages for the platform it runs
+    // on, and release.yml gives each platform its own runner.
+    val skikoToken =
+        when {
+            osName.contains("mac") -> "macos"
+            osName.contains("win") -> "windows"
+            else -> "linux"
+        } + "-" + if (osArch == "aarch64" || osArch == "arm64") "arm64" else "x64"
+
+    val sqliteOs =
+        when {
+            osName.contains("mac") -> "Mac"
+            osName.contains("win") -> "Windows"
+            else -> "Linux"
+        }
+    val sqliteArch = if (osArch == "aarch64" || osArch == "arm64") "aarch64" else "x86_64"
+
+    doLast {
+        val appDir = appDirProvider.get().asFile
+        if (!appDir.isDirectory) {
+            println("ℹ️  No app image at ${appDir.absolutePath} - nothing to strip")
+            return@doLast
+        }
+
+        // Rewrites a jar keeping only the entries `keep` accepts. Local to the
+        // action so it captures nothing from the build script. Returns the bytes
+        // saved, or 0 if the jar was left alone.
+        fun rewriteJar(
+            jar: File,
+            keep: (String) -> Boolean,
+        ): Long {
+            val before = jar.length()
+            val temp = File(jar.parentFile, "${jar.name}.stripping")
+            var dropped = 0
+            ZipFile(jar).use { zip ->
+                ZipOutputStream(temp.outputStream().buffered()).use { out ->
+                    for (entry in zip.entries()) {
+                        if (!keep(entry.name)) {
+                            dropped++
+                            continue
+                        }
+                        // Copying the ZipEntry preserves the method, and for a
+                        // STORED entry also the size and CRC the writer demands.
+                        out.putNextEntry(ZipEntry(entry))
+                        zip.getInputStream(entry).use { it.copyTo(out) }
+                        out.closeEntry()
+                    }
+                }
+            }
+            if (dropped == 0) {
+                temp.delete()
+                return 0
+            }
+            check(temp.renameTo(jar) || (jar.delete() && temp.renameTo(jar))) {
+                "Could not replace ${jar.absolutePath} with the stripped jar"
+            }
+            return before - jar.length()
+        }
+
+        var saved = 0L
+
+        // skiko: keep the native for this platform, drop the rest. The matching
+        // one is usually already gone (Compose extracts it next to the jar), so
+        // its absence is expected and must not be treated as a mis-detection.
+        val skikoNative = Regex("""(?:lib)?skiko-(?:macos|linux|windows)-(?:arm64|x64)\.(?:dylib|so|dll)(?:\.sha256)?$""")
+        appDir
+            .walkTopDown()
+            .filter { it.isFile && it.name.startsWith("skiko-awt-runtime-") && it.name.endsWith(".jar") }
+            .forEach { jar ->
+                val freed =
+                    rewriteJar(jar) { name ->
+                        val leaf = name.substringAfterLast('/')
+                        !skikoNative.matches(leaf) || leaf.contains(skikoToken)
+                    }
+                if (freed > 0) {
+                    saved += freed
+                    println("🧹 ${jar.name}: freed ${freed / 1024} KB of non-$skikoToken skiko natives")
+                }
+            }
+
+        // sqlite-jdbc: keep org/sqlite/native/<OS>/<arch>/, drop the other ~19.
+        // On Linux keep the musl build of the same arch too -- it is ~1 MB and
+        // covers a glibc-built package installed on a musl system.
+        val keepPrefixes =
+            buildList {
+                add("org/sqlite/native/$sqliteOs/$sqliteArch/")
+                if (sqliteOs == "Linux") add("org/sqlite/native/Linux-Musl/$sqliteArch/")
+            }
+        appDir
+            .walkTopDown()
+            .filter { it.isFile && it.name.startsWith("sqlite-jdbc-") && it.name.endsWith(".jar") }
+            .forEach { jar ->
+                // Refuse to strip a jar that does not contain the native we
+                // believe this platform needs: that means the OS/arch mapping is
+                // wrong, and stripping would leave a jar with no loadable native
+                // at all. Leaving it whole costs 10 MB; getting it wrong breaks
+                // every SQLite read on the platform.
+                val hasOurs =
+                    ZipFile(jar).use { zip ->
+                        zip.entries().asSequence().any { e -> keepPrefixes.any { e.name.startsWith(it) } }
+                    }
+                if (!hasOurs) {
+                    println("⚠️  ${jar.name}: no native under ${keepPrefixes.first()} - leaving it intact")
+                    return@forEach
+                }
+                val freed =
+                    rewriteJar(jar) { name ->
+                        !name.startsWith("org/sqlite/native/") || keepPrefixes.any { name.startsWith(it) }
+                    }
+                if (freed > 0) {
+                    saved += freed
+                    println("🧹 ${jar.name}: freed ${freed / 1024} KB of non-$sqliteOs/$sqliteArch SQLite natives")
+                }
+            }
+
+        println("✅ Foreign-platform natives stripped: ${saved / 1024 / 1024} MB freed")
+    }
+}
+
+// Extract CLI script to app bundle Resources for Homebrew installation
+tasks.register("extractCLIToAppResources") {
+    description = "Extracts CLI script to BOSS.app/Contents/Resources for Homebrew binary stanza"
+    group = "build"
+
+    // Configuration cache: the onlyIf/doLast lambdas must not reach through
+    // the enclosing script object (this$0 is null after the task graph is
+    // deserialized) nor call Task.project at execution time — capture
+    // everything they need as task-local values at configuration time.
+    // Providers stay lazy: .get() still happens inside doLast.
+    val onMacHost = isMacOSHost
+    val signingDisabledProvider = macOSSigningDisabledProvider
+    val developerId = macOSDeveloperId
+    val appDirProvider = layout.buildDirectory.dir("compose/binaries/main/app")
+    val generatedCliDirProvider = layout.buildDirectory.dir("generated/resources/cli")
+    val entitlementsFile = project.file("src/desktopMain/resources/BOSS.entitlements")
+
+    // Only run on macOS
+    onlyIf {
+        onMacHost
+    }
+
+    // Inject ExecOperations for exec calls (replaces deprecated project.exec)
+    val injected = project.objects.newInstance<InjectedExecOps>()
+
+    doLast {
+        println("📦 Extracting CLI script to app bundle Resources...")
+
+        // Signing is skipped when disabled explicitly or no keychain identity is available.
+        // Resolved here inside doLast, i.e. at execution time only.
+        val signingDisabled = signingDisabledProvider.get()
+
+        // Find the built app in the standard Compose Desktop location
+        val appDir = appDirProvider.get().asFile
+        val appFile = appDir.listFiles()?.find { it.name.endsWith(".app") }
+
+        if (appFile?.exists() == true) {
+            println("Found app: ${appFile.name}")
+
+            // Target location: BOSS.app/Contents/Resources/
+            val resourcesDir = File(appFile, "Contents/Resources")
+            resourcesDir.mkdirs()
+
+            // Source: generated CLI script from build/generated/resources/cli/boss
+            val generatedCLIDir = generatedCliDirProvider.get().asFile
+            val cliScript = File(generatedCLIDir, "boss")
+
+            if (cliScript.exists()) {
+                val targetScript = File(resourcesDir, "boss")
+
+                // Copy the CLI script
+                cliScript.copyTo(targetScript, overwrite = true)
+
+                // Make it executable
+                targetScript.setExecutable(true, false)
+
+                println("✅ CLI script installed to: ${targetScript.absolutePath}")
+                println("   Homebrew will symlink this to /opt/homebrew/bin/boss")
+
+                // CRITICAL: Re-sign the entire app bundle after adding the CLI script
+                // This is necessary because adding files to a signed bundle invalidates the signature
+                if (!signingDisabled) {
+                    println("🔒 Re-signing app bundle after CLI script installation...")
+                    try {
+                        injected.execOps.exec {
+                            commandLine(
+                                "codesign",
+                                "--force",
+                                "--deep",
+                                "--options",
+                                "runtime",
+                                "--sign",
+                                developerId,
+                                "--timestamp",
+                                "--entitlements",
+                                entitlementsFile.absolutePath,
+                                appFile.absolutePath,
+                            )
+                        }
+
+                        // Verify the re-signed app
+                        injected.execOps.exec {
+                            commandLine("codesign", "-vvv", "--deep", "--strict", appFile.absolutePath)
+                        }
+
+                        println("✅ App bundle re-signed successfully after CLI script installation")
+                    } catch (e: Exception) {
+                        println("❌ Failed to re-sign app bundle: ${e.message}")
+                        throw e
+                    }
+                } else {
+                    println("⚠️  Signing disabled - skipping app bundle re-signing")
+                }
+            } else {
+                println("⚠️  Warning: Generated CLI script not found at ${cliScript.absolutePath}")
+                println("   Make sure generateVersionedCLIScripts task ran successfully")
+            }
+        } else {
+            println("⚠️  Warning: Built app not found at ${appDir.absolutePath}")
+            println("   This task should run after createDistributable")
+        }
+    }
+}
+
+// Sign PTY4J native binaries with hardened runtime for macOS notarization
+// This is required because pty4j-unix-spawn-helper is not signed by default
+tasks.register("signPty4jBinaries") {
+    description = "Signs PTY4J native binaries with hardened runtime for Apple notarization"
+    group = "build"
+
+    // Configuration cache: the onlyIf/doLast lambdas must not reach through
+    // the enclosing script object (this$0 is null after the task graph is
+    // deserialized) nor call Task.project at execution time — capture
+    // everything they need as task-local values at configuration time.
+    // The signing-disabled provider stays lazy: .get() happens at execution.
+    val onMacHost = isMacOSHost
+    val signingDisabledProvider = macOSSigningDisabledProvider
+    val developerId = macOSDeveloperId
+    val appDirProvider = layout.buildDirectory.dir("compose/binaries/main/app")
+    val entitlementsFile = project.file("src/desktopMain/resources/BOSS.entitlements")
+
+    // Only run on macOS and when signing is enabled (resolved at execution time)
+    onlyIf {
+        onMacHost && !signingDisabledProvider.get()
+    }
+
+    // Inject ExecOperations for exec calls (replaces deprecated project.exec)
+    val injected = project.objects.newInstance<InjectedExecOps>()
+
+    doLast {
+        println("🔧 Signing PTY4J native binaries with hardened runtime for notarization...")
+
+        if (developerId == "-") {
+            println("⚠️ No signing identity found, skipping PTY4J signing")
+            return@doLast
+        }
+
+        // Find the built app in the standard Compose Desktop location
+        val appDir = appDirProvider.get().asFile
+        val appFile = appDir.listFiles()?.find { it.name.endsWith(".app") }
+
+        if (appFile?.exists() == true) {
+            println("Found app: ${appFile.name}")
+
+            // Find PTY4J jar inside the app
+            val appContents = File(appFile, "Contents/app")
+            val pty4jJar =
+                appContents.listFiles()?.find {
+                    it.name.startsWith("pty4j-") && it.name.endsWith(".jar")
+                }
+
+            if (pty4jJar?.exists() == true) {
+                println("Processing PTY4J jar: ${pty4jJar.name}")
+
+                // Create temporary directory for jar manipulation
+                val tempDir = File(System.getProperty("java.io.tmpdir"), "pty4j-sign-${System.currentTimeMillis()}")
+                tempDir.mkdirs()
+
+                try {
+                    // Extract the entire jar
+                    injected.execOps.exec {
+                        workingDir = tempDir
+                        commandLine("jar", "xf", pty4jJar.absolutePath)
+                    }
+
+                    // Sign PTY4J native libraries with hardened runtime
+                    val nativeFiles =
+                        tempDir
+                            .walkTopDown()
+                            .filter {
+                                it.isFile && (it.name.endsWith(".dylib") || it.name.contains("spawn-helper"))
+                            }.toList()
+
+                    if (nativeFiles.isNotEmpty()) {
+                        println("Found ${nativeFiles.size} PTY4J native binary(ies) to sign:")
+                        var signingFailures = 0
+
+                        for (nativeFile in nativeFiles) {
+                            println("  Signing: ${nativeFile.relativeTo(tempDir)}")
+
+                            // Make executable
+                            nativeFile.setExecutable(true)
+
+                            // Sign with hardened runtime
+                            try {
+                                injected.execOps.exec {
+                                    commandLine(
+                                        "codesign",
+                                        "--force",
+                                        "--options",
+                                        "runtime",
+                                        "--sign",
+                                        developerId,
+                                        "--timestamp",
+                                        nativeFile.absolutePath,
+                                    )
+                                }
+
+                                // Verify signature
+                                injected.execOps.exec {
+                                    commandLine("codesign", "-vv", nativeFile.absolutePath)
+                                }
+
+                                println("    ✅ Successfully signed ${nativeFile.name}")
+                            } catch (e: Exception) {
+                                signingFailures++
+                                println("    ❌ Failed to sign ${nativeFile.name}: ${e.message}")
+                            }
+                        }
+
+                        // Fail the build if any native binary failed to sign
+                        if (signingFailures > 0) {
+                            throw GradleException(
+                                "❌ PTY4J signing failed: $signingFailures of ${nativeFiles.size} native binary(ies) could not be signed. " +
+                                    "This will cause notarization to fail.",
+                            )
+                        }
+
+                        // Recreate the jar with signed native libraries
+                        val signedJar = File(pty4jJar.parentFile, "${pty4jJar.nameWithoutExtension}-signed.jar")
+                        injected.execOps.exec {
+                            workingDir = tempDir
+                            commandLine("jar", "cf", signedJar.absolutePath, ".")
+                        }
+
+                        // Replace original jar with signed version
+                        pty4jJar.delete()
+                        signedJar.renameTo(pty4jJar)
+
+                        println("✅ PTY4J jar updated with signed native libraries")
+                    } else {
+                        println("⚠️ Warning: No PTY4J native binaries found in jar")
+                    }
+                } finally {
+                    // Clean up temp directory
+                    tempDir.deleteRecursively()
+                }
+
+                // CRITICAL: Re-sign the entire app bundle after modifying the JAR
+                println("🔒 Re-signing app bundle after PTY4J modifications...")
+                try {
+                    injected.execOps.exec {
+                        commandLine(
+                            "codesign",
+                            "--force",
+                            "--deep",
+                            "--options",
+                            "runtime",
+                            "--sign",
+                            developerId,
+                            "--timestamp",
+                            "--entitlements",
+                            entitlementsFile.absolutePath,
+                            appFile.absolutePath,
+                        )
+                    }
+
+                    // Verify the re-signed app
+                    injected.execOps.exec {
+                        commandLine("codesign", "-vvv", "--deep", "--strict", appFile.absolutePath)
+                    }
+
+                    println("✅ App bundle re-signed successfully after PTY4J signing")
+                } catch (e: Exception) {
+                    println("❌ Failed to re-sign app bundle: ${e.message}")
+                    throw e
+                }
+            } else {
+                println("⚠️ Warning: PTY4J jar not found in ${appContents.absolutePath}")
+            }
+        } else {
+            println("⚠️ Warning: Built app not found at ${appDir.absolutePath}")
+            println("   This task should run after createDistributable")
+        }
+    }
+}
+
+// Fix Linux .desktop file to add StartupWMClass for proper desktop integration
+// This task post-processes the .deb file after jpackage creates it
+// Note: RPM packages require rpmbuild for repacking, which is not handled here
+abstract class FixLinuxDesktopFileTask : DefaultTask() {
+    @get:Inject
+    abstract val execOps: ExecOperations
+
+    @get:InputDirectory
+    @get:Optional
+    abstract val debDir: DirectoryProperty
+
+    @TaskAction
+    fun fixDesktopFile() {
+        println("🔧 Fixing Linux .desktop file for proper dock integration...")
+
+        val debDirectory = debDir.orNull?.asFile
+        if (debDirectory == null || !debDirectory.exists()) {
+            println("⚠️ No .deb directory found")
+            return
+        }
+
+        val debFile = debDirectory.listFiles()?.find { it.name.endsWith(".deb") }
+        if (debFile == null) {
+            println("⚠️ No .deb file found in $debDirectory")
+            return
+        }
+
+        println("📦 Fixing .desktop file in ${debFile.name}...")
+        val workDir = File(debDirectory, "fix-temp-${System.currentTimeMillis()}")
+        workDir.mkdirs()
+
+        try {
+            // Extract deb contents
+            execOps.exec {
+                commandLine("dpkg-deb", "-R", debFile.absolutePath, workDir.absolutePath)
+            }
+
+            // Find and modify .desktop file in the applications directory
+            var modified = false
+            workDir
+                .walkTopDown()
+                .filter { file ->
+                    file.isFile &&
+                        file.name.endsWith(".desktop") &&
+                        // Verify it's in a valid location (lib/ or applications/)
+                        (file.path.contains("/lib/") || file.path.contains("/applications/"))
+                }.forEach { desktopFile ->
+                    var content = desktopFile.readText()
+                    var fileModified = false
+
+                    // Add StartupWMClass if missing
+                    if (!content.contains("StartupWMClass")) {
+                        content = content.trimEnd() + "\nStartupWMClass=BOSS\n"
+                        println("✅ Added StartupWMClass=BOSS to ${desktopFile.name}")
+                        fileModified = true
+                    }
+
+                    // Change Icon path to use standard icon name for better desktop integration
+                    if (content.contains("Icon=/opt/boss/lib/BOSS.png")) {
+                        content = content.replace("Icon=/opt/boss/lib/BOSS.png", "Icon=boss")
+                        println("✅ Changed Icon to use standard name in ${desktopFile.name}")
+                        fileModified = true
+                    }
+
+                    if (fileModified) {
+                        desktopFile.writeText(content)
+                        modified = true
+                    } else {
+                        println("ℹ️ No changes needed for ${desktopFile.name}")
+                    }
+                }
+
+            // Copy icon to hicolor theme directory for proper desktop integration
+            val iconSource = workDir.walkTopDown().find { it.name == "BOSS.png" && it.path.contains("/lib/") }
+            if (iconSource != null) {
+                val hicolorDir = File(workDir, "usr/share/icons/hicolor/256x256/apps")
+                hicolorDir.mkdirs()
+                val iconDest = File(hicolorDir, "boss.png")
+                iconSource.copyTo(iconDest, overwrite = true)
+                println("✅ Copied icon to hicolor theme: ${iconDest.path}")
+                modified = true
+            }
+
+            // Make desktop integration best-effort in the maintainer scripts.
+            // jpackage's generated postinst/prerm run xdg-* tools (xdg-desktop-menu,
+            // xdg-icon-resource, ...) under `set -e`; on headless systems (servers,
+            // containers, CI) those exit non-zero (e.g. "No writable system menu
+            // directory found"), which aborts dpkg configure/remove and leaves the
+            // package half-installed. Tolerates leading whitespace and covers the
+            // whole xdg-* class in case a future jpackage reorders or indents them.
+            // Assumes single-line commands (true of jpackage output); a trailing
+            // backslash continuation would put the appended `||` on the wrong line.
+            listOf("postinst", "prerm").forEach { scriptName ->
+                val script = File(workDir, "DEBIAN/$scriptName")
+                if (script.isFile) {
+                    val content = script.readText()
+                    // The marker guard keeps this idempotent: without it the regex
+                    // would re-match an already-patched line and append a second `||`.
+                    if (!content.contains("skipping desktop integration")) {
+                        val patched =
+                            content.replace(
+                                Regex("(?m)^([ \\t]*)(xdg-\\S+ .*)$"),
+                                "\$1\$2 || echo \"boss: no desktop environment detected, skipping desktop integration\" >&2",
+                            )
+                        if (patched != content) {
+                            script.writeText(patched)
+                            println("✅ Made xdg-* desktop integration best-effort in $scriptName (headless installs)")
+                            modified = true
+                        }
+                    }
+                }
+            }
+
+            // Soften the generated dependency on xdg-utils.
+            //
+            // jpackage lists xdg-utils in the .deb's `Depends:` field (its postinst
+            // uses xdg-desktop-menu / xdg-icon-resource), so on a headless image
+            // without that package `dpkg -i` fails during dependency resolution —
+            // before postinst exists to be guarded, which is why the postinst fix
+            // above only closed half of the headless problem. Desktop integration is
+            // best-effort here, so xdg-utils belongs under `Recommends:`: apt still
+            // pulls it in by default on desktop systems, while a headless install no
+            // longer hard-fails. Note `dpkg -i` does NOT honor Recommends, so a
+            // desktop install done that way silently skips menu/icon registration
+            // instead of failing — install with apt to get the recommends.
+            //
+            // The transform itself lives in buildSrc (DebControl) so it can be
+            // unit-tested without a Linux runner; see DebControlTest.
+            val controlFile = File(workDir, "DEBIAN/control")
+            if (controlFile.isFile) {
+                DebControl.softenXdgUtilsDependency(controlFile.readText())?.let { rewritten ->
+                    controlFile.writeText(rewritten)
+                    println("✅ Moved xdg-utils from Depends to Recommends in DEBIAN/control (headless installs)")
+                    modified = true
+                }
+            }
+
+            if (modified) {
+                // Repack deb using dpkg-deb --build
+                execOps.exec {
+                    commandLine("dpkg-deb", "--build", "--root-owner-group", workDir.absolutePath, debFile.absolutePath)
+                }
+                println("✅ Repacked ${debFile.name} with desktop-integration fixes")
+            }
+        } catch (e: Exception) {
+            println("❌ Failed to fix .desktop file: ${e.message}")
+            throw e
+        } finally {
+            workDir.deleteRecursively()
+        }
+    }
+}
+
+tasks.register<FixLinuxDesktopFileTask>("fixLinuxDesktopFile") {
+    description = "Fixes the .deb for desktop integration: StartupWMClass, hicolor icon, and headless-safe maintainer scripts"
+    group = "build"
+
+    val isLinux = System.getProperty("os.name").lowercase().contains("linux")
+    onlyIf { isLinux }
+
+    debDir.set(layout.buildDirectory.dir("compose/binaries/main/deb"))
+}
+
+// Configure task dependencies for DMG packaging
+afterEvaluate {
+    // Make run tasks depend on the extraction tasks
+    tasks.findByName("run")?.apply {
+        dependsOn("extractJcefNatives")
+    }
+
+    // Ensure prepareAppResources depends on prepareBundledPluginsResources
+    tasks.findByName("prepareAppResources")?.apply {
+        dependsOn("prepareBundledPluginsResources")
+    }
+
+    val isMacOS = isMacOSHost
+
+    // Configure createDistributable
+    tasks.findByName("createDistributable")?.apply {
+        // Ensure CLI scripts are generated before distribution tasks run
+        dependsOn("generateVersionedCLIScripts")
+        // Ensure bundled plugins are prepared
+        dependsOn("prepareBundledPluginsResources")
+
+        // Every platform trims the app image; only macOS signs it afterwards.
+        finalizedBy("stripForeignPlatformNatives")
+
+        // Task chain: createDistributable → stripForeignPlatformNatives →
+        // signPty4jBinaries → extractCLIToAppResources.
+        // The signing finalizers are wired unconditionally so the signing decision
+        // is NOT needed at configuration time (keeps the keychain scan lazy): when
+        // signing is disabled, signPty4jBinaries skips itself via its own onlyIf
+        // and the CLI extraction still runs.
+        if (isMacOS) {
+            finalizedBy("signPty4jBinaries", "extractCLIToAppResources")
+            println(
+                "📝 createDistributable will be finalized by signPty4jBinaries (skips itself when signing is disabled) and extractCLIToAppResources",
+            )
+        }
+    }
+
+    // The strip must land before anything signs or packages the image, or the
+    // signature seals jars that are about to change underneath it.
+    tasks.findByName("stripForeignPlatformNatives")?.apply {
+        mustRunAfter("createDistributable")
+    }
+
+    // signPty4jBinaries runs after the image is trimmed, then triggers extractCLIToAppResources
+    tasks.findByName("signPty4jBinaries")?.apply {
+        mustRunAfter("createDistributable", "stripForeignPlatformNatives")
+        if (isMacOS) {
+            finalizedBy("extractCLIToAppResources")
+            println("📝 signPty4jBinaries will be finalized by extractCLIToAppResources")
+        }
+    }
+
+    // Ensure extractCLIToAppResources depends on CLI script generation and runs after
+    // PTY4J signing. mustRunAfter is pure ordering — harmless when signPty4jBinaries
+    // is skipped — so it needs no config-time signing check.
+    tasks.findByName("extractCLIToAppResources")?.apply {
+        dependsOn("generateVersionedCLIScripts")
+        mustRunAfter("signPty4jBinaries", "stripForeignPlatformNatives")
+        println("📝 extractCLIToAppResources will depend on generateVersionedCLIScripts")
+    }
+
+    // Ensure packageDmg runs after all signing/CLI tasks (ordering only, see above)
+    tasks.findByName("packageDmg")?.apply {
+        if (isMacOS) {
+            mustRunAfter("signPty4jBinaries", "extractCLIToAppResources")
+            println("📝 packageDmg will run after PTY4J signing and CLI extraction")
+        }
+    }
+
+    // Linux and Windows have no signing step to order against, so they need the
+    // strip wired to their packaging tasks directly.
+    listOf("packageDeb", "packageRpm", "packageMsi", "packageAppImage").forEach { name ->
+        tasks.findByName(name)?.mustRunAfter("stripForeignPlatformNatives")
+    }
+
+    // Linux: Fix .desktop file after DEB packaging to add StartupWMClass
+    // Note: RPM repacking requires rpmbuild toolchain which is complex;
+    // RPM packages will need manual StartupWMClass addition or a separate script
+    val isLinux = System.getProperty("os.name").lowercase().contains("linux")
+    if (isLinux) {
+        tasks.findByName("fixLinuxDesktopFile")?.apply {
+            mustRunAfter("packageDeb")
+        }
+        tasks.findByName("packageDeb")?.apply {
+            finalizedBy("fixLinuxDesktopFile")
+            println("📝 packageDeb will be finalized by fixLinuxDesktopFile")
+        }
+    }
+}
+
+// Task to create an executable JAR
+tasks.register<Jar>("createExecutableJar") {
+    dependsOn("desktopJar")
+    group = "build"
+    description = "Creates an executable JAR with all dependencies"
+
+    // Enable zip64 for JARs with more than 65535 entries
+    isZip64 = true
+
+    archiveClassifier.set("all")
+    archiveBaseName.set("BOSS")
+    archiveVersion.set(appVersion as String)
+    destinationDirectory.set(layout.buildDirectory.dir("libs"))
+
+    // Get the desktop jar output
+    val desktopJar = tasks.named<Jar>("desktopJar").get()
+
+    // Include the main jar contents
+    from(zipTree(desktopJar.archiveFile.get().asFile))
+
+    // Include all runtime dependencies
+    from(
+        configurations.named("desktopRuntimeClasspath").get().map {
+            if (it.isDirectory) it else zipTree(it)
+        },
+    ) {
+        exclude("META-INF/*.SF")
+        exclude("META-INF/*.DSA")
+        exclude("META-INF/*.RSA")
+        exclude("META-INF/MANIFEST.MF")
+        exclude("module-info.class")
+    }
+
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+
+    manifest {
+        attributes(
+            mapOf(
+                "Main-Class" to "ai.rever.boss.MainKt",
+                "Implementation-Title" to "BOSS",
+                "Implementation-Version" to appVersion,
+                "Implementation-Vendor" to "Akash Jadon",
+                "Multi-Release" to "true",
+            ),
+        )
+    }
+}
+
+// Task to package JAR with native libraries
+tasks.register<Zip>("packageJarWithNatives") {
+    dependsOn("createExecutableJar", "extractJcefNatives")
+    group = "build"
+    description = "Creates a distributable package with JAR and native libraries"
+
+    archiveBaseName.set("BOSS-package")
+    archiveVersion.set(appVersion as String)
+    archiveExtension.set("zip")
+    destinationDirectory.set(layout.buildDirectory.dir("distributions"))
+
+    // Include the executable JAR
+    from(layout.buildDirectory.dir("libs")) {
+        include("BOSS-$appVersion-all.jar")
+        into("")
+    }
+
+    // Include native libraries
+    from(layout.buildDirectory.dir("jcef-natives")) {
+        into("jcef-natives")
+    }
+
+    // Include launch scripts
+    from(projectDir) {
+        include("launch.sh", "launch.bat")
+        into("")
+    }
+}
+
+// Ensure version constants are generated before Kotlin compilation
+tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile> {
+    dependsOn(generateVersionConstants)
+}
+
+// Configure Test tasks to not fail when no tests are discovered (Gradle 9+ compatibility)
+tasks.withType<Test> {
+    // Use JUnit Platform for test discovery
+    useJUnitPlatform()
+    // Disable failure when test sources exist but no tests are discovered
+    // This handles misconfigured test sources or test classes without test methods
+    failOnNoDiscoveredTests = false
+
+    // Point the test JVM's home at a build directory, so BossDirectories.rootDir resolves to
+    // <build>/test-home/.boss instead of the developer's real ~/.boss.
+    //
+    // This is not hygiene. ProjectState.updateRecentProjects persists to that directory and keeps
+    // only MAX_RECENT_PROJECTS = 10 entries, so a test that records a handful of projects EVICTS
+    // real ones from the developer's picker, and no cleanup can put them back. Several other
+    // classes here read user.home too (DefaultWorkingDirectoryTest, ProjectRemovalTest,
+    // WorkspaceApplierMigrationTest); they read it through the same property, so they stay
+    // consistent - which is why this belongs on the task rather than in one test's setup.
+    // BossDirectories.rootDir is a `by lazy` on a process-global, so the task is the only
+    // reliable place to set it: by the time any test code runs it is too late.
+    val testHome =
+        layout.buildDirectory
+            .dir("test-home/$name")
+            .get()
+            .asFile
+    systemProperty("user.home", testHome.absolutePath)
+    // Deleted, not just created. ProjectState's saves are fire-and-forget, so the FIRST run
+    // leaves a recent-projects.json behind; on the second, ProjectState.init's async load takes
+    // its `if (file.exists())` branch and assigns _recentProjects.value wholesale, which can land
+    // mid-test. A stale home reintroduces exactly the flake the redirect removes, so the home is
+    // fresh per run rather than merely private.
+    doFirst {
+        testHome.deleteRecursively()
+        testHome.mkdirs()
+    }
+}
+
+// Wrapper tasks that auto-increment build number before packaging
+tasks.register("packageDmgWithIncrement") {
+    group = "distribution"
+    description = "Builds DMG package with auto-incremented build number"
+
+    doFirst {
+        // Execute auto-increment before packaging
+        rootProject.tasks.findByName("autoIncrementBuildNumber")?.actions?.forEach {
+            it.execute(rootProject.tasks.getByName("autoIncrementBuildNumber"))
+        }
+    }
+
+    finalizedBy("packageDmg")
+}
+
+tasks.register("packageMsiWithIncrement") {
+    group = "distribution"
+    description = "Builds MSI package with auto-incremented build number"
+
+    doFirst {
+        rootProject.tasks.findByName("autoIncrementBuildNumber")?.actions?.forEach {
+            it.execute(rootProject.tasks.getByName("autoIncrementBuildNumber"))
+        }
+    }
+
+    finalizedBy("packageMsi")
+}
+
+tasks.register("createExecutableJarWithIncrement") {
+    group = "build"
+    description = "Creates executable JAR with auto-incremented build number"
+
+    doFirst {
+        rootProject.tasks.findByName("autoIncrementBuildNumber")?.actions?.forEach {
+            it.execute(rootProject.tasks.getByName("autoIncrementBuildNumber"))
+        }
+    }
+
+    finalizedBy("createExecutableJar")
+}
+
+// Task to download Chromium binaries for branding
+// Uses desktop runtime classpath since this is a Kotlin Multiplatform project
+// Detached configuration for the JxBrowser platform binary needed by downloadChromium.
+// This is NOT included in the app runtime (branded Chromium is used instead).
+val jxBrowserPlatformBinary: Configuration = configurations.create("jxBrowserPlatformBinary")
+
+dependencies {
+    jxBrowserPlatformBinary(jxbrowser.currentPlatform)
+}
+
+tasks.register<JavaExec>("downloadChromium") {
+    group = "jxbrowser"
+    description = "Downloads JxBrowser Chromium binaries to a specified directory"
+
+    dependsOn("desktopJar")
+
+    // Use the desktop JAR and its dependencies, plus the platform binary for extraction
+    classpath =
+        files(
+            tasks.named("desktopJar").map { it.outputs.files },
+            configurations.named("desktopRuntimeClasspath"),
+            jxBrowserPlatformBinary,
+        )
+    mainClass.set("ai.rever.boss.ChromiumDownloaderKt")
+
+    // Output directory can be configured via -PchromiumDir=<path>
+    val chromiumDir =
+        project.findProperty("chromiumDir")?.toString()
+            ?: "${System.getProperty("user.home")}/chromium-binaries"
+
+    args = listOf(chromiumDir)
+
+    doFirst {
+        println("Downloading Chromium to: $chromiumDir")
+    }
+}

@@ -1,0 +1,41 @@
+<?xml version="1.0" ?>
+<SmellBaseline>
+  <ManuallySuppressedIssues/>
+  <CurrentIssues>
+    <ID>ForbiddenComment:PluginStoreClient.kt$PluginDetailResponse$// TODO: Implement proper timestamp parsing if needed</ID>
+    <ID>LongMethod:RemotePluginRepository.kt$RemotePluginRepository$override suspend fun downloadPlugin( pluginId: String, version: String?, targetPath: String, onProgress: ((Float) -&gt; Unit)?, ): Result&lt;String&gt;</ID>
+    <ID>LongParameterList:RemotePluginRepository.kt$RemotePluginRepository$( sha256: String, signature: String?, pluginId: String, versionLabel: String, requestedVersion: String?, onVerificationFailure: () -&gt; Unit, )</ID>
+    <ID>MaxLineLength:PluginStoreRealtimeService.kt$PluginStoreRealtimeService$logger.warn(LogCategory.NETWORK, "Plugins subscription lost, reconnecting in ${backoffMs}ms", error = e)</ID>
+    <ID>MaxLineLength:PluginStoreRealtimeService.kt$PluginStoreRealtimeService$logger.warn(LogCategory.NETWORK, "Versions subscription lost, reconnecting in ${backoffMs}ms", error = e)</ID>
+    <ID>MaxLineLength:RemotePluginRepository.kt$RemotePluginRepository$private</ID>
+    <ID>MaxLineLength:RemotePluginRepository.kt$RemotePluginRepository$val totalBytes = response.headers[io.ktor.http.HttpHeaders.ContentLength]?.toLongOrNull() ?: downloadInfo.size</ID>
+    <ID>ReturnCount:PluginDownloadCache.kt$PluginDownloadCache$fun getCachedJar( pluginId: String, version: String, expectedSha256: String, ): File?</ID>
+    <ID>ReturnCount:PluginDownloadCache.kt$PluginDownloadCache$fun removeAllVersions(pluginId: String): Int</ID>
+    <ID>ReturnCount:PluginRepositoryManager.kt$PluginRepositoryManager$private fun isNewerVersion( version1: String, version2: String, ): Boolean</ID>
+    <ID>ReturnCount:PluginRepositoryManager.kt$PluginRepositoryManager$suspend fun downloadPlugin( pluginId: String, version: String? = null, targetPath: String, onProgress: ((Float) -&gt; Unit)? = null, ): Result&lt;String&gt;</ID>
+    <ID>ReturnCount:PluginStoreConfig.kt$PluginStoreConfig$private fun decodeIsAdmin(token: String?): Boolean</ID>
+    <ID>ThrowsCount:RemotePluginRepository.kt$RemotePluginRepository$internal fun enforceStoreSignature( sha256: String, signature: String?, pluginId: String, versionLabel: String, requestedVersion: String?, onVerificationFailure: () -&gt; Unit, )</ID>
+    <ID>TooGenericExceptionCaught:LocalPluginRepository.kt$LocalPluginRepository$e: Exception</ID>
+    <ID>TooGenericExceptionCaught:PluginStoreRealtimeService.kt$PluginStoreRealtimeService$e: Exception</ID>
+    <ID>TooManyFunctions:PluginDownloadCache.kt$PluginDownloadCache</ID>
+    <ID>TooManyFunctions:PluginRepositoryManager.kt$PluginRepositoryManager</ID>
+    <ID>TooManyFunctions:PluginStoreClient.kt$PluginStoreClient</ID>
+    <ID>TooManyFunctions:RemotePluginRepository.kt$RemotePluginRepository : PluginRepository</ID>
+    <ID>UnusedParameter:PluginStoreClient.kt$PluginDetailResponse$timestamp: String</ID>
+    <ID>UseCheckOrError:PluginStoreConfig.kt$PluginStoreConfig$throw IllegalStateException("PluginStoreConfig not initialized. Call initialize() first.")</ID>
+    <ID>WildcardImport:DesktopHttpClient.kt$import io.ktor.client.*</ID>
+    <ID>WildcardImport:DesktopHttpClient.kt$import io.ktor.client.engine.cio.*</ID>
+    <ID>WildcardImport:DesktopHttpClient.kt$import io.ktor.client.plugins.contentnegotiation.*</ID>
+    <ID>WildcardImport:DesktopHttpClient.kt$import io.ktor.serialization.kotlinx.json.*</ID>
+    <ID>WildcardImport:PluginStoreClient.kt$import io.ktor.client.*</ID>
+    <ID>WildcardImport:PluginStoreClient.kt$import io.ktor.client.request.*</ID>
+    <ID>WildcardImport:PluginStoreClient.kt$import io.ktor.client.statement.*</ID>
+    <ID>WildcardImport:PluginStoreClient.kt$import io.ktor.http.*</ID>
+    <ID>WildcardImport:RemotePluginRepository.kt$import ai.rever.boss.plugin.repository.*</ID>
+    <ID>WildcardImport:RemotePluginRepository.kt$import io.ktor.client.*</ID>
+    <ID>WildcardImport:RemotePluginRepository.kt$import io.ktor.client.engine.cio.*</ID>
+    <ID>WildcardImport:RemotePluginRepository.kt$import io.ktor.client.request.*</ID>
+    <ID>WildcardImport:RemotePluginRepository.kt$import io.ktor.client.statement.*</ID>
+    <ID>WildcardImport:RemotePluginRepository.kt$import io.ktor.utils.io.*</ID>
+  </CurrentIssues>
+</SmellBaseline>

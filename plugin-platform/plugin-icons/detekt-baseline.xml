@@ -1,0 +1,18 @@
+<?xml version="1.0" ?>
+<SmellBaseline>
+  <ManuallySuppressedIssues/>
+  <CurrentIssues>
+    <ID>CyclomaticComplexMethod:FileIcons.kt$FileIcons$fun forFile(fileName: String): FileIconInfo</ID>
+    <ID>CyclomaticComplexMethod:FileIcons.kt$FileIcons$private fun forSpecialFileName(fileName: String): FileIconInfo?</ID>
+    <ID>CyclomaticComplexMethod:LanguageIcons.kt$LanguageIcons$fun forDatabase(database: String): Pair&lt;ImageVector, Color&gt;</ID>
+    <ID>CyclomaticComplexMethod:LanguageIcons.kt$LanguageIcons$fun forExtensionOrNull(extension: String): Pair&lt;ImageVector, Color&gt;?</ID>
+    <ID>CyclomaticComplexMethod:LanguageIcons.kt$LanguageIcons$fun forFramework(framework: String): Pair&lt;ImageVector, Color&gt;</ID>
+    <ID>CyclomaticComplexMethod:LanguageIcons.kt$LanguageIcons$fun forLanguage(language: String): Pair&lt;ImageVector, Color&gt;</ID>
+    <ID>LongMethod:FileIcons.kt$FileIcons$fun forFile(fileName: String): FileIconInfo</ID>
+    <ID>LongMethod:FileIcons.kt$FileIcons$private fun forSpecialFileName(fileName: String): FileIconInfo?</ID>
+    <ID>LongMethod:LanguageIcons.kt$LanguageIcons$fun forExtensionOrNull(extension: String): Pair&lt;ImageVector, Color&gt;?</ID>
+    <ID>LongMethod:LanguageIcons.kt$LanguageIcons$fun forFramework(framework: String): Pair&lt;ImageVector, Color&gt;</ID>
+    <ID>WildcardImport:FileIcons.kt$import androidx.compose.material.icons.outlined.*</ID>
+    <ID>WildcardImport:LanguageIcons.kt$import compose.icons.simpleicons.*</ID>
+  </CurrentIssues>
+</SmellBaseline>

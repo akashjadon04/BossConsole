@@ -1,0 +1,313 @@
+package ai.rever.boss.utils
+
+import ai.rever.boss.services.supabase.models.SecretEntry
+import ai.rever.boss.utils.logging.BossLogger
+import ai.rever.boss.utils.logging.LogCategory
+
+/**
+ * Utility for matching secrets to website domains.
+ *
+ * Handles:
+ * - Domain extraction from URLs
+ * - Full hostname preservation, with a leading www. removed
+ * - Exact and dot-boundary matching between secret website and current domain
+ * - Scoring and ranking of matched secrets
+ *
+ * Used by Issue #56 - Secret Access Integration with Fluck Browser
+ */
+object WebsiteMatchingUtil {
+    private val logger = BossLogger.forComponent("WebsiteMatchingUtil")
+
+    /**
+     * Represents a matched secret with its relevance score
+     */
+    data class MatchedSecret(
+        val secret: SecretEntry,
+        val matchScore: Float, // 0.0 - 1.0
+        val matchReason: String, // "exact", "subdomain"
+    ) : Comparable<MatchedSecret> {
+        override fun compareTo(other: MatchedSecret): Int {
+            return other.matchScore.compareTo(this.matchScore) // Descending
+        }
+    }
+
+    /**
+     * Extract the full hostname from a URL, removing a leading www.
+     *
+     * The historical function name is retained for callers. No registrable-domain or
+     * public-suffix guessing is performed: sibling hosts remain distinct.
+     *
+     * Examples:
+     * - https://login.google.com/auth → login.google.com
+     * - https://www.github.com/login → github.com
+     * - https://accounts.google.com → accounts.google.com
+     * - http://localhost:3000 → localhost
+     * - https://example.co.uk → example.co.uk
+     *
+     * @param url The URL to extract domain from
+     * @return Cleaned hostname, or null if parsing fails
+     */
+    fun extractMainDomain(url: String): String? {
+        return try {
+            val cleanUrl = url.trim()
+
+            // Handle empty or invalid URLs
+            if (cleanUrl.isEmpty() || cleanUrl == "about:blank") {
+                return null
+            }
+
+            // Add protocol if missing for parsing
+            val urlWithProtocol =
+                if (!cleanUrl.startsWith("http://") && !cleanUrl.startsWith("https://")) {
+                    "https://$cleanUrl"
+                } else {
+                    cleanUrl
+                }
+
+            // Parse URL
+            val javaUrl = java.net.URL(urlWithProtocol)
+            var host = javaUrl.host.lowercase()
+
+            // Handle localhost and IP addresses
+            if (host.startsWith("localhost") || host.matches(Regex("""^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$"""))) {
+                return host
+            }
+
+            // Remove www. prefix
+            host = host.removePrefix("www.")
+
+            host
+        } catch (e: Exception) {
+            logger.debug(LogCategory.BROWSER, "Failed to extract domain", mapOf("url" to url, "error" to e.toString()))
+            null
+        }
+    }
+
+    /**
+     * Match secrets for a specific domain with scoring.
+     *
+     * Returns secrets sorted by relevance (highest score first).
+     * Matching logic:
+     * - Exact match (google.com == google.com): score 1.0
+     * - Subdomain match (login.google.com vs google.com): score 0.9
+     *
+     * Substrings and shared labels do not establish a domain relationship and must not
+     * produce credential suggestions. Only equality and a dot-delimited suffix qualify.
+     * [extractMainDomain] preserves the hostname rather than guessing a registrable domain.
+     * This scorer does not validate public suffixes. Explicit parent-domain entries still
+     * match subdomains in either direction; sibling hostnames do not match each other.
+     *
+     * @param domain Current website domain (e.g., "google.com")
+     * @param secrets List of all available secrets
+     * @param maxResults Maximum number of results to return (default: 5)
+     * @return List of matched secrets with scores, sorted by relevance
+     */
+    fun matchSecretsForDomain(
+        domain: String,
+        secrets: List<SecretEntry>,
+        maxResults: Int = 5,
+    ): List<MatchedSecret> {
+        val normalizedDomain = domain.lowercase().removePrefix("www.")
+
+        val matchedSecrets =
+            secrets.mapNotNull { secret ->
+                val secretDomain = extractMainDomain(secret.website) ?: secret.website.lowercase()
+                val score = calculateMatchScore(secretDomain, normalizedDomain)
+
+                if (score.score > 0.3f) { // Threshold for relevance
+                    MatchedSecret(
+                        secret = secret,
+                        matchScore = score.score,
+                        matchReason = score.reason,
+                    )
+                } else {
+                    null
+                }
+            }
+
+        return matchedSecrets
+            .sorted() // Sort by score descending
+            .take(maxResults)
+    }
+
+    /**
+     * Calculate match score between secret website and current domain.
+     *
+     * @return MatchScore with score (0.0-1.0) and reason
+     */
+    fun calculateMatchScore(
+        secretWebsite: String,
+        currentDomain: String,
+    ): MatchScore {
+        val secretNorm = secretWebsite.lowercase().trim()
+        val domainNorm = currentDomain.lowercase().trim()
+
+        return when {
+            // Without this, two blank sides (e.g. a secret with no recorded website, or a
+            // domain extraction failure that fell through to an empty string) would satisfy
+            // the exact-match check below vacuously: "" == "".
+            secretNorm.isEmpty() || domainNorm.isEmpty() -> {
+                MatchScore(0.0f, "no_match")
+            }
+
+            // Exact match
+            secretNorm == domainNorm -> {
+                MatchScore(1.0f, "exact")
+            }
+
+            // Subdomain match (login.google.com vs google.com) - a real subdomain boundary,
+            // never a bare substring: "snapple.com".endsWith(".apple.com") is false.
+            secretNorm.endsWith(".$domainNorm") || domainNorm.endsWith(".$secretNorm") -> {
+                MatchScore(0.9f, "subdomain")
+            }
+
+            else -> {
+                MatchScore(0.0f, "no_match")
+            }
+        }
+    }
+
+    /**
+     * Match score with reasoning
+     */
+    data class MatchScore(
+        val score: Float,
+        val reason: String,
+    )
+
+    /**
+     * Get a user-friendly display name for a website.
+     *
+     * Examples:
+     * - google.com → Google
+     * - github.com → GitHub
+     * - example-site.com → Example Site
+     * - accounts.google.com → accounts.google.com
+     * - google.com.evil.com → google.com.evil.com
+     *
+     * @param website Website domain or URL
+     * @return Formatted display name
+     */
+    fun getDisplayName(website: String): String {
+        val domain = extractMainDomain(website) ?: website
+
+        // Without a public-suffix policy, a multi-label host must stay visible in full.
+        // Using its first label would present google.com.evil.com as the trusted brand Google.
+        if (domain.count { it == '.' } > 1) return domain
+
+        // Remove TLD
+        val nameWithoutTld = domain.split(".").first()
+
+        // Handle special cases
+        return when (domain.lowercase()) {
+            "google.com" -> {
+                "Google"
+            }
+
+            "github.com" -> {
+                "GitHub"
+            }
+
+            "facebook.com" -> {
+                "Facebook"
+            }
+
+            "linkedin.com" -> {
+                "LinkedIn"
+            }
+
+            "twitter.com" -> {
+                "Twitter (X)"
+            }
+
+            "microsoft.com" -> {
+                "Microsoft"
+            }
+
+            "apple.com" -> {
+                "Apple"
+            }
+
+            "amazon.com" -> {
+                "Amazon"
+            }
+
+            "netflix.com" -> {
+                "Netflix"
+            }
+
+            else -> {
+                // Generic formatting: example-site → Example Site
+                nameWithoutTld
+                    .split("-", "_")
+                    .joinToString(" ") {
+                        it.replaceFirstChar { c -> if (c.isLowerCase()) c.titlecase() else c.toString() }
+                    }
+            }
+        }
+    }
+
+    /**
+     * Check if a URL is likely a login/authentication page.
+     *
+     * Helps prioritize showing secret menu on login pages.
+     *
+     * @param url Current page URL
+     * @return true if URL suggests login page
+     */
+    fun isLikelyLoginPage(url: String): Boolean {
+        val lowerUrl = url.lowercase()
+        val loginKeywords =
+            listOf(
+                "login",
+                "signin",
+                "sign-in",
+                "auth",
+                "authenticate",
+                "password",
+                "sso",
+                "oauth",
+                "accounts",
+                "signup",
+                "sign-up",
+                "register",
+            )
+
+        return loginKeywords.any { lowerUrl.contains(it) }
+    }
+
+    /**
+     * Return hostname labels before the final two labels, if present.
+     *
+     * This legacy helper is not public-suffix aware and must not define credential boundaries.
+     * A leading www. is removed by [extractMainDomain] before labels are selected.
+     *
+     * Examples:
+     * - login.google.com → login
+     * - www.example.com → null
+     * - a.example.co.uk → a.example
+     * - example.com → null
+     *
+     * @param url URL to extract subdomain from
+     * @return Subdomain or null
+     */
+    fun extractSubdomain(url: String): String? {
+        return try {
+            val domain = extractMainDomain(url) ?: return null
+            val parts = domain.split(".")
+
+            if (parts.size > 2) {
+                parts.dropLast(2).joinToString(".")
+            } else {
+                null
+            }
+        } catch (e: Exception) {
+            logger.debug(
+                LogCategory.BROWSER,
+                "Failed to extract subdomain - treating as none",
+                mapOf("url" to url, "error" to e.toString()),
+            )
+            null
+        }
+    }
+}

@@ -1,0 +1,477 @@
+name: 🔨 Build & Test
+
+on:
+  push:
+    branches: [ main, develop, dev ]
+  pull_request:
+    branches: [ main, dev ]
+  workflow_dispatch:
+
+env:
+  JAVA_VERSION: '17'
+  JAVA_DISTRIBUTION: 'temurin'
+  GRADLE_OPTS: '-Dorg.gradle.daemon=false -Dorg.gradle.parallel=true -Dorg.gradle.caching=true'
+  # Production credentials for build
+  JXBROWSER_LICENSE_KEY: ${{ secrets.JXBROWSER_LICENSE_KEY }}
+  SUPABASE_ANON_KEY: ${{ secrets.SUPABASE_ANON_KEY }}
+  SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+  SUPABASE_FUNCTION_URL: ${{ secrets.SUPABASE_FUNCTION_URL }}
+
+jobs:
+  script-tests:
+    name: 🐚 Shell Script Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          # Full history: the em-dash guard below diffs against the PR base, and
+          # at the default depth of 1 that base is unreachable, so the diff fails
+          # and the guard passes every PR. Reproduced in a depth-1 clone.
+          fetch-depth: 0
+
+      - name: 🧪 Claude review authorization tests
+        run: node --test .github/scripts/test-claude-review.cjs
+
+      - name: Headless CLI launcher tests
+        run: bash scripts/test/test-headless-cli.sh
+
+      - name: 🧪 Release publish — TUS slice tests
+        # Guards the byte-accurate chunk slicing in the release publish path
+        # (regressed twice: #877 misaligned resume, and the SIGPIPE status bug).
+        run: bash scripts/test/test-tus-slice.sh
+
+      - name: 🧪 Release notarization — retry/resume tests
+        # Guards the macOS notarization retry path: a dropped status poll must
+        # resume the existing submission, never re-upload, and an actual Apple
+        # rejection must still fail fast (run 30067806575 lost 9.2.59 to this).
+        # Apple is stubbed, so this runs on ubuntu with no credentials.
+        run: bash scripts/test/test-notarize-dmg.sh
+
+      - name: 🧪 Bundled Chromium version stamp
+        # Release builds only run on publish, so nothing else exercises the
+        # bundling steps before they ship. version.txt is the only cross-platform
+        # signal of which Chromium build a bundled engine carries — without it an
+        # engine gets no version check at all off macOS (BossConsole#123).
+        run: bash scripts/test/test-bundled-chromium-stamp.sh
+
+      - name: 🧪 JxBrowser auto-release detector tests
+        # GitHub and Artifact Registry are stubbed so every decision path is
+        # deterministic and does not consume credentials.
+        run: bash scripts/test/test-jxbrowser-autorelease.sh
+
+      - name: 🧪 JxBrowser version pin PR tests
+        # The pin bump runs unattended every four hours against the version
+        # catalog, so the expensive failures are silent ones: a rewrite that
+        # matches nothing, one that also catches jxbrowser-gradle-plugin on the
+        # next line, a lexical compare that reads 9.4.10 as older than 9.4.9, or
+        # reopening a bump a human closed. git and gh are stubbed.
+        run: bash scripts/test/test-jxbrowser-pin-pr.sh
+
+      - name: 🧪 Browser interaction collector
+        # BrowserInteractionScript is JavaScript inside a Kotlin string, so the
+        # Kotlin suite can only grep it - and every budget bug in it so far was
+        # found by running it, not by reading it. This executes the real script
+        # against a fake DOM, and checks the paths it produces against the host's
+        # own MAX_PATH_LENGTH / PATH_SHAPE, which are hand-matched across two
+        # files and two languages and fail by making elementPath vanish silently.
+        run: node scripts/test/test-browser-collector.js
+
+      - name: 🧪 Find-key probe
+        # BrowserFindKeyProbe's script decides whether the PAGE keeps Cmd+F (Sheets,
+        # Docs, Notion all claim it) or BOSS opens its own find bar, and it is
+        # JavaScript inside a Kotlin string too. The case that matters - a page
+        # calling preventDefault AND stopPropagation - cannot be distinguished by
+        # reading the script: the wrong implementation looks equivalent and reports
+        # the page's own find as "free". Only executing it tells them apart.
+        run: node scripts/test/test-find-key-probe.js
+
+      - name: 🧪 Cmd+click link handler
+        # injectCmdClickHandler decides whether BOSS adopts a link into a new tab or leaves the
+        # click to Chromium, and it is JavaScript inside a Kotlin string too. Grepping it pins the
+        # spelling rather than the behaviour: an SVG anchor's href is an SVGAnimatedString, so the
+        # unguarded handler opened a tab on the literal "[object SVGAnimatedString]" - a bug no
+        # reading of the script reveals and executing it catches immediately.
+        run: node scripts/test/test-cmd-click.js
+
+      - name: 🧪 Two-finger swipe navigation
+        # The macOS back/forward gesture is detected in the page, and it is a set of
+        # thresholds: how far commits, how much vertical drift disqualifies, how big a
+        # delta has to be before it is a mouse wheel rather than a trackpad. Every one of
+        # them is a number that looks reasonable while being wrong, and reading the script
+        # cannot tell a working set from a broken one. It also pins the bridge and state
+        # property names against the Kotlin, which are hand-matched across two files and
+        # two languages and drift into a gesture that silently does nothing.
+        run: node scripts/test/test-swipe-nav.js
+
+      - name: ✍️ No new em-dashes in prose
+        # House style is a spaced hyphen. Scoped to ADDED lines on purpose: the
+        # sweep left code comments alone by design, so a whole-tree check would
+        # fail forever. Comparing against the merge base means a PR is judged on
+        # what it introduces, not on what it inherited.
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          BASE="${{ github.event.pull_request.base.sha }}"
+
+          # Assert the base is reachable BEFORE diffing. Without this the diff
+          # fails on a shallow checkout, grep sees empty input, and the trailing
+          # `|| true` turns the whole guard into a permanent pass. That is how
+          # the first version of this shipped, and a full local clone hid it.
+          if ! git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+            echo "::error::base commit $BASE is unreachable; this job needs fetch-depth: 0"
+            exit 1
+          fi
+
+          # Prose only. *.kt is excluded because a diff cannot tell a comment
+          # from a literal, and comments are deliberately out of scope; literals
+          # are convention upheld by review. Matches U+2014 only, not en-dashes,
+          # which are used deliberately for ranges (28-34) and arrows.
+          DIFF=$(git diff "${BASE}...HEAD" -- '*.md' '*.html')
+          ADDED=$(printf '%s\n' "$DIFF" | grep -E '^\+' | grep -v '^+++' | grep -- '—' || true)
+
+          if [[ -n "$ADDED" ]]; then
+            echo "::error::Added lines contain an em-dash. Use a spaced hyphen ( - ) instead."
+            printf '%s\n' "$ADDED" | head -20
+            exit 1
+          fi
+          echo "✅ no em-dashes added ($(printf '%s\n' "$DIFF" | grep -cE '^\+' || true) added prose lines checked)"
+
+      - name: 🧪 Release download table tests
+        # Generates the Downloads section of every release body, which also
+        # becomes app_releases.release_notes and is rendered by the in-app update
+        # dialog. Release workflows only run on publish, so nothing else touches
+        # it first. Guards the two ways it can publish something wrong: a row for
+        # an optional ARM64 asset that was never built (a live 404), and a
+        # pre-release page whose "always latest" links point at an older stable.
+        run: bash scripts/test/test-release-download-table.sh
+
+  version-check:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.get-version.outputs.version }}
+      build-number: ${{ steps.get-version.outputs.build-number }}
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v7
+
+      # No JDK and no Gradle here on purpose. This job's two outputs are read
+      # out of version.properties with grep, and the `./gradlew showVersion`
+      # that used to follow them only printed the same file back: ShowVersionTask
+      # is a read-only task that loads version.properties and formats it, and it
+      # derives nothing the file does not already hold.
+      #
+      # It cost the whole job. Measured on three consecutive runs, the step took
+      # 153s / 157s / 211s out of a 160s / 163s / 221s job - a cold Gradle
+      # distribution download and a full configuration pass, with no
+      # setup-gradle cache to fall back on. build-test (three OSes),
+      # code-quality, compatibility-test and database-tests all `needs:` this
+      # job, so every pull request queued its entire matrix behind it.
+      #
+      # Printing the properties file directly gives a reader strictly more than
+      # the formatted box did, in milliseconds. `🧪 Test Version System` in
+      # compatibility-test still exercises showVersion itself, where the task is
+      # the thing under test and the job has a Gradle cache.
+      - name: 🔍 Version Information
+        id: get-version
+        run: |
+          # Get version info using our centralized system
+          VERSION=$(grep "^app.version=" version.properties | cut -d'=' -f2)
+          BUILD_NUMBER=$(grep "^app.build.number=" version.properties | cut -d'=' -f2)
+
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "build-number=$BUILD_NUMBER" >> $GITHUB_OUTPUT
+
+          echo "📦 Version: $VERSION"
+          echo "🔢 Build Number: $BUILD_NUMBER"
+
+          echo "📋 version.properties:"
+          sed 's/^/   /' version.properties
+
+  build-test:
+    needs: version-check
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: ☕ Setup JDK
+        uses: actions/setup-java@v6.0.0
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+
+      - name: 🎯 Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-read-only: false
+
+      - name: 🧹 Stop Kotlin Daemon (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          echo "Stopping any existing Kotlin daemons to avoid file handle issues"
+          ./gradlew --stop || true
+        shell: bash
+
+      - name: 🧪 Run Tests
+        run: |
+          echo "🧪 Running tests on ${{ matrix.os }}"
+          ./gradlew test --continue
+        env:
+          # boss-plugin-api-core resolution from GitHub Packages (settings/composeApp repos)
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Windows-specific: disable daemon to avoid file handle issues (KT-55959)
+          GRADLE_OPTS: ${{ matrix.os == 'windows-latest' && '-Dorg.gradle.daemon=false -Dorg.gradle.parallel=false -Dorg.gradle.caching=true -Dkotlin.daemon.jvm.options=-Xmx2g' || '-Dorg.gradle.daemon=false -Dorg.gradle.parallel=true -Dorg.gradle.caching=true' }}
+
+      - name: 🔨 Build Application
+        run: |
+          echo "🔨 Building application for ${{ matrix.os }}"
+          # detekt and ktlintCheck are authoritative in the code-quality job;
+          # skip the redundant per-OS runs the plugins wire into check
+          # (3x waste + confusing signal).
+          #
+          # -PskipLint rather than `-x`: ktlint wires a ktlint<SourceSet>Check
+          # task into `check` for every source set, so `-x ktlintCheck` dropped
+          # only the umbrella task and left 351 ktlint tasks running per OS,
+          # which is how a formatting slip failed this job instead of (just)
+          # code-quality.
+          ./gradlew build -PskipLint --stacktrace
+        env:
+          # boss-plugin-api-core resolution from GitHub Packages (settings/composeApp repos)
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Windows-specific: disable daemon to avoid file handle issues (KT-55959)
+          GRADLE_OPTS: ${{ matrix.os == 'windows-latest' && '-Dorg.gradle.daemon=false -Dorg.gradle.parallel=false -Dorg.gradle.caching=true -Dkotlin.daemon.jvm.options=-Xmx2g' || '-Dorg.gradle.daemon=false -Dorg.gradle.parallel=true -Dorg.gradle.caching=true' }}
+
+      - name: 🏗️ Create Executable JAR
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          echo "🏗️ Creating executable JAR"
+          ./gradlew createExecutableJar
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 📊 Upload Test Results
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: test-results-${{ matrix.os }}
+          path: |
+            **/build/test-results/test/
+            **/build/test-results/desktopTest/
+            **/build/reports/tests/test/
+            **/build/reports/tests/desktopTest/
+            **/build/reports/tests/allTests/
+          retention-days: 7
+
+      - name: 📦 Upload Build Artifacts
+        if: success() && matrix.os == 'ubuntu-latest'
+        uses: actions/upload-artifact@v7
+        with:
+          name: boss-jar-${{ needs.version-check.outputs.version }}-build${{ github.run_number }}
+          path: composeApp/build/libs/*-all.jar
+          retention-days: 14
+
+  code-quality:
+    runs-on: ubuntu-latest
+    needs: version-check
+
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: ☕ Setup JDK
+        uses: actions/setup-java@v6.0.0
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+
+      - name: 🎯 Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-read-only: false
+
+      - name: 🔍 Static Analysis (detekt + ktlint)
+        run: |
+          echo "🔍 Running detekt and ktlintCheck across all modules"
+          # detekt is baselined per module: existing debt is frozen in
+          # detekt-baseline.xml files, only NEW violations fail this step.
+          # ktlintCheck gates formatting since the format-the-world PR.
+          ./gradlew detekt ktlintCheck
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 📊 Upload detekt Reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: detekt-reports
+          path: '**/build/reports/detekt/'
+          retention-days: 7
+
+      - name: 🧪 buildSrc Tests
+        run: |
+          echo "🧪 Running buildSrc unit tests"
+          # Regular Gradle invocations only *build* buildSrc (its jar), so these tests
+          # never run unless invoked explicitly. They cover the .deb control-file
+          # rewrite (DebControl), whose only other exercise is a Linux release build.
+          ./gradlew -p buildSrc test
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 🔒 Dependency Check
+        run: |
+          echo "🔒 Checking dependencies"
+          ./gradlew :composeApp:dependencies
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  compatibility-test:
+    runs-on: ubuntu-latest
+    needs: version-check
+
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: ☕ Setup JDK
+        uses: actions/setup-java@v6.0.0
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+
+      - name: 🎯 Setup Gradle
+        uses: gradle/actions/setup-gradle@v6
+
+      - name: 🧪 Test Version System
+        run: |
+          echo "🧪 Testing centralized version system"
+          
+          # Test version increment tasks
+          echo "📋 Current version info:"
+          ./gradlew showVersion
+          
+          echo "🔄 Testing version increment (dry run):"
+          echo "- Patch increment test"
+          ORIGINAL_VERSION=$(grep "^app.version=" version.properties | cut -d'=' -f2)
+          echo "Original version: $ORIGINAL_VERSION"
+          
+          # Test that version system works
+          ./gradlew generateVersionConstants
+          
+          # Verify generated constants exist
+          if [ -f "composeApp/build/generated/source/version/ai/rever/boss/utils/VersionConstants.kt" ]; then
+            echo "✅ Version constants generated successfully"
+            cat composeApp/build/generated/source/version/ai/rever/boss/utils/VersionConstants.kt
+          else
+            echo "❌ Version constants not generated"
+            exit 1
+          fi
+
+      - name: 🔄 Test Auto-Update Integration
+        run: |
+          echo "🔄 Testing auto-update system integration"
+          
+          # Compile to ensure Version.CURRENT works with generated constants
+          ./gradlew :composeApp:compileKotlinDesktop
+          
+          echo "✅ Auto-update integration test passed"
+
+  boss-ai-tests:
+    name: BOSS AI contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - run: deno task check && deno task test
+        working-directory: supabase/functions/boss-ai
+
+  database-tests:
+    name: 🧪 Database (pgTAP)
+    runs-on: ubuntu-latest
+    needs: [version-check, boss-ai-tests]
+    if: ${{ !cancelled() && needs.version-check.result == 'success' }}
+
+    steps:
+      - name: Require BOSS AI contract checks
+        run: test "${{ needs.boss-ai-tests.result }}" = "success"
+
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: 🟩 Setup Supabase CLI
+        uses: supabase/setup-cli@v2
+        with:
+          # Pinned (not "latest"): resolving "latest" hits the unauthenticated GitHub
+          # API from shared runners and intermittently fails with "rate limit exceeded".
+          # Pinning skips that lookup. Bump as needed.
+          version: 2.109.0
+
+      - name: 🚀 Start local Postgres (applies migrations)
+        run: supabase db start
+
+      - name: Prepare real migration fixtures for upgrade regression
+        run: python3 scripts/test/prepare-totp-migration-fixtures.py
+
+      - name: 🧱 Prepare DB access tests
+        run: |
+          python3 scripts/test/prepare-db-access-tests.py
+          # Fails if a generated suite is stale or orphaned. Both of those
+          # otherwise produce a green run over the wrong content.
+          python3 scripts/test/prepare-db-access-tests.py --check
+
+      - name: 🧪 Run pgTAP RBAC tests
+        run: supabase test db
+
+      - name: Verify BOSS AI admission across PostgreSQL sessions
+        timeout-minutes: 2
+        run: python3 scripts/test/test-boss-ai-concurrency.py
+
+      - name: 🧹 Stop Supabase
+        if: always()
+        run: supabase stop --no-backup || true
+
+  build-summary:
+    if: ${{ !cancelled() }}
+    needs: [version-check, build-test, code-quality, compatibility-test, database-tests, boss-ai-tests]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📊 Build Summary
+        run: |
+          echo "## 🔨 Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Version**: ${{ needs.version-check.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Build Number**: ${{ github.run_number }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit**: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          # Job status
+          echo "### 📋 Job Results" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version Check**: ${{ needs.version-check.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Build & Test**: ${{ needs.build-test.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Code Quality**: ${{ needs.code-quality.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Compatibility Test**: ${{ needs.compatibility-test.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Database (pgTAP)**: ${{ needs.database-tests.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **BOSS AI contracts**: ${{ needs.boss-ai-tests.result }}" >> $GITHUB_STEP_SUMMARY
+
+          # Overall status
+          if [[ "${{ needs.build-test.result }}" == "success" && "${{ needs.code-quality.result }}" == "success" && "${{ needs.compatibility-test.result }}" == "success" && "${{ needs.database-tests.result }}" == "success" && "${{ needs.boss-ai-tests.result }}" == "success" ]]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "🎉 **Overall Status**: ✅ SUCCESS" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "❌ **Overall Status**: FAILED" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi
+
+# Temporarily disabled for debugging
+  # notify-build:
+  #   needs: [version-check, build-test, code-quality, compatibility-test]
+  #   if: always() && (success() || failure()) && github.event_name != 'pull_request'
+  #   uses: ./.github/workflows/notifications.yml

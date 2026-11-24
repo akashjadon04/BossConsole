@@ -1,0 +1,184 @@
+package ai.rever.boss.plugin
+
+import ai.rever.boss.components.plugin.DynamicPluginInfo
+import ai.rever.boss.components.plugin.DynamicPluginManager
+import ai.rever.boss.components.plugin.MissingDependencyInstaller
+import ai.rever.boss.components.plugin.MissingDependencyPrompt
+import ai.rever.boss.components.plugin.PluginDependencyBus
+import ai.rever.boss.components.plugin.PluginDependencyEventBus
+import ai.rever.boss.components.plugin.PluginDependencyResolution
+import ai.rever.boss.plugin.api.PluginManifest
+import ai.rever.boss.plugin.loader.ApiClassLoader
+import ai.rever.boss.plugin.sandbox.ui.PluginCrashRegistry
+import ai.rever.boss.utils.WindowFocusManager
+import ai.rever.boss.utils.logging.BossLogger
+import ai.rever.boss.utils.logging.LogCategory
+import java.io.File
+
+/**
+ * Raises the install-time prompt for dependencies a plugin declares but which are absent.
+ *
+ * A class, and not the private method it started as, because more than one host path
+ * activates a plugin on a user's behalf and each of them should report:
+ *
+ * - `PluginLoaderDelegateImpl.loadPlugin`, which the plugin-manager's install and update flows
+ *   reach directly;
+ * - `PluginInstallService`, the first-run wizard - the path where several plugins are chosen at
+ *   once, so the one where an unmet dependency is *most* likely;
+ * - `PluginUpdateBridge`, where an update can add a dependency the installed version never had;
+ * - `DynamicPluginManager.enablePlugin` and `handleAccessChange`, via `onPluginActivated` -
+ *   re-enabling a disabled plugin, including one that was hidden for lack of access (#180).
+ *
+ * What must not report is a **reload**: `resetPluginInstances`, the Toolbox's reload and the
+ * evolver's hot reload all end in a load, and none of them is a user asking to install
+ * anything. Startup restore, the bundled-plugin load and the api hot-swap's reload-all go
+ * through `DynamicPluginManager.installPlugin` directly and so never reach here at all - which
+ * is the point, since a prompt on those paths would be one dialog per plugin on every launch.
+ *
+ * Takes the two things it needs rather than a `DynamicPluginManager`, so what it decides is
+ * testable without standing up a loader, a sandbox and two registries. [forManager] is the
+ * shape every real call site wants.
+ */
+class MissingDependencyReporter(
+    private val states: () -> Map<String, DynamicPluginInfo>,
+    private val installer: MissingDependencyInstaller,
+    private val bus: PluginDependencyBus = PluginDependencyEventBus,
+    private val jarExists: (String) -> Boolean = { File(it).isFile },
+    private val isIncompatible: (String) -> Boolean = { PluginCrashRegistry.isIncompatible(it) },
+) {
+    private val logger = BossLogger.forComponent("MissingDependencyReporter")
+
+    /**
+     * The plugins that count as installed, shared by the report set and the Install guard.
+     *
+     * See `PluginDependencyResolution.installedAndOnDisk` for why one definition matters.
+     */
+    private fun installedPluginIds() =
+        PluginDependencyResolution.installedAndOnDisk(
+            states = states(),
+            exists = jarExists,
+            isIncompatible = isIncompatible,
+        )
+
+    /**
+     * Report whatever [manifest] declares and does not have.
+     *
+     * Fire-and-forget. A missing dependency is worth mentioning but never worth failing an
+     * install the user asked for, or making them wait on a window that may not exist yet.
+     */
+    fun report(manifest: PluginManifest) {
+        runCatching {
+            val installed = installedPluginIds()
+            logUnofferable(manifest, installed)
+
+            // Best-effort: the window that is actionable right now, at the moment the install
+            // this dependency was found on finishes. Same imprecision every other consumer of
+            // resolveActionableWindowId already accepts (deep links, CLI commands) - not a new
+            // standard, just applied here too so the prompt has a window to prefer.
+            val windowId = WindowFocusManager.resolveActionableWindowId()
+
+            PluginDependencyResolution
+                .missingFor(manifest, installed)
+                .forEach { missing ->
+                    logger.info(
+                        LogCategory.SYSTEM,
+                        "Installed plugin declares a dependency that is not present",
+                        mapOf(
+                            "plugin" to missing.dependentPluginId,
+                            "missing" to missing.missingPluginId,
+                            "optional" to missing.optional,
+                        ),
+                    )
+                    bus.report(MissingDependencyPrompt(missing, installer, windowId = windowId))
+                }
+        }.onFailure { error ->
+            logger.warn(
+                LogCategory.SYSTEM,
+                "Could not check a plugin's dependencies",
+                mapOf("plugin" to manifest.pluginId, "error" to (error.message ?: "unknown")),
+            )
+        }
+    }
+
+    /**
+     * Log the dependencies that are missing but cannot be offered.
+     *
+     * `missingFor` filters system components out, so without this a plugin genuinely lacking the
+     * api plugin produced no prompt *and* no log line - the same silence this feature exists to
+     * remove, in the case where a support log matters most.
+     */
+    private fun logUnofferable(
+        manifest: PluginManifest,
+        installed: Set<String>,
+    ) {
+        manifest.dependencies
+            // The api plugin only: the microkernel runtime is skipped on directory scan and
+            // refused by `loadPlugin`, so it is *never* in `pluginStates` and this test is always
+            // true for it - every out-of-process plugin declaring it would warn that a system
+            // component is missing while its child JVMs spawn perfectly well.
+            .filter { it.pluginId == ApiClassLoader.API_PLUGIN_ID && it.pluginId !in installed }
+            .forEach { dependency ->
+                logger.warn(
+                    LogCategory.SYSTEM,
+                    "Plugin declares a missing system component, which cannot be offered for install",
+                    mapOf("plugin" to manifest.pluginId, "missing" to dependency.pluginId),
+                )
+            }
+    }
+
+    companion object {
+        /**
+         * The reporter every real install path wants: bound to one window's manager.
+         *
+         * Bound so the dependency loads into the same manager that was missing it, and reaching
+         * the store lazily because `PluginStoreSetup` initialises during startup while a
+         * reporter can outlive a store that never came up at all.
+         */
+        fun forManager(manager: DynamicPluginManager): MissingDependencyReporter =
+            MissingDependencyReporter(
+                states = { manager.pluginStates.value },
+                installer = installerFor(manager),
+            )
+
+        /**
+         * The store installer bound to one manager.
+         *
+         * Extracted from [forManager] because the home screen's tool grid installs from the
+         * store too, and it must use *this* installer rather than its own download path - see
+         * [StoreMissingDependencyInstaller] for the five defects a second path would have to
+         * re-solve. One construction site also keeps both callers on one definition of
+         * "installed", which AGENTS.md records as having broken the dependency prompt once
+         * already when two halves disagreed.
+         *
+         * Keep the reporting manager while it is live. After its window closes, resolve another
+         * live manager at use time. With none left, loading fails explicitly instead of reviving
+         * the disposed manager. Presence and load both use this policy.
+         */
+        fun installerFor(manager: DynamicPluginManager): MissingDependencyInstaller {
+            fun activeManager(): DynamicPluginManager? = DynamicPluginManager.activeManagerOrFallback(manager)
+
+            val installedNow: (String) -> Boolean = { pluginId ->
+                pluginId in
+                    PluginDependencyResolution.installedAndOnDisk(
+                        states = activeManager()?.pluginStates?.value.orEmpty(),
+                        exists = { File(it).isFile },
+                        isIncompatible = { PluginCrashRegistry.isIncompatible(it) },
+                    )
+            }
+            return StoreMissingDependencyInstaller(
+                repository = { PluginStoreSetup.remoteRepository },
+                pluginDir = { PluginStoreSetup.getPluginDir() },
+                hooks =
+                    InstallerHooks(
+                        installedNow = installedNow,
+                        load = { jarPath ->
+                            activeManager()?.installPlugin(jarPath)
+                                ?: Result.failure<Unit>(
+                                    IllegalStateException("No active window is available to install the plugin."),
+                                )
+                        },
+                    ),
+            )
+        }
+    }
+}

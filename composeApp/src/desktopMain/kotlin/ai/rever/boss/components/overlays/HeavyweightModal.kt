@@ -1,0 +1,134 @@
+package ai.rever.boss.components.overlays
+
+import ai.rever.boss.plugin.browser.LocalAwtWindow
+import ai.rever.boss.window.ApplyBossWindowIcon
+import ai.rever.boss.window.BossWindowIcon
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.remember
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.Window
+
+/**
+ * Heavyweight modal host for HARDWARE_ACCELERATED browser mode.
+ *
+ * Renders [content] (a full-window scrim + centered dialog, e.g. the new-tab dialog) in a separate
+ * transparent, undecorated, always-on-top window sized to the parent window, so it layers ABOVE
+ * the heavyweight JxBrowser surface instead of behind it. Injected into
+ * OverlayConfig.heavyweightModal and only used when OverlayConfig.useHeavyweightPopups is true, so
+ * it can't affect the OFF_SCREEN path.
+ *
+ * Bounds are captured once at open — a modal is transient, so the parent will not move
+ * meaningfully while it is up. The logical-px to dp mapping is 1:1 in Compose Desktop, verified on
+ * a 150%-scaled Windows display alongside [HeavyweightPopup]; the earlier "may mis-size on HiDPI"
+ * caveat here was resolved by that work and has been removed rather than left contradicting it.
+ *
+ * Dismissal is focus-loss (filtered by [shouldDismissOnFocusLoss]) plus Escape, and the caller's
+ * own scrim. Focus-loss alone is not sufficient and not always correct:
+ *
+ *  - It does NOT fire for a click on the page. Chromium's native child window takes focus without
+ *    an AWT focus transition — the same thing [HeavyweightPopup] had to stop relying on. In-page
+ *    dismissal therefore depends on the caller drawing its own scrim, which `NewTabDialog` does.
+ *    A modal WITHOUT one would not dismiss on an in-page click.
+ *  - It fires when a CHILD overlay of the modal takes focus, which must not dismiss. A dropdown
+ *    inside the modal is its own always-on-top window; see [shouldDismissOnFocusLoss].
+ *
+ * Still true by default: alt-tabbing to another application dismisses, discarding anything typed
+ * (e.g. a half-entered URL). Giving this the same scrim treatment as [HeavyweightPopup] would fix
+ * that properly. A caller whose dismissal is destructive opts out of the focus-loss path entirely
+ * via [LocalDismissModalOnFocusLoss] (issue #152) rather than living with it.
+ */
+@Composable
+fun HeavyweightModal(
+    properties: DialogProperties,
+    onDismissRequest: () -> Unit,
+    content: @Composable () -> Unit,
+) {
+    val parent = LocalAwtWindow.current
+    val bounds = rememberOverlayParentBounds(parent)
+    val state = rememberOverlayWindowState(bounds)
+    // Read here, in the composable body, because the AWT focus listener below is not a composition
+    // and cannot call `.current`. A modal that opts out (see [LocalDismissModalOnFocusLoss]) still
+    // dismisses on Escape and on its own scrim - only the focus-loss path is suppressed.
+    val dismissOnFocusLoss = LocalDismissModalOnFocusLoss.current
+
+    Window(
+        onCloseRequest = onDismissRequest,
+        state = state,
+        undecorated = true,
+        transparent = true,
+        alwaysOnTop = true,
+        focusable = true,
+        resizable = false,
+        icon = BossWindowIcon.painter,
+        onKeyEvent = { event ->
+            // dismissOnBackPress is what Compose maps Escape to, and only this window can honour it:
+            // Escape is handled here, not by anything inside the content. A caller that passed
+            // dismissOnBackPress = false used to get an Escape-proof dialog on the lightweight path
+            // and an Escape-dismissable one here.
+            if (properties.dismissOnBackPress && event.type == KeyEventType.KeyDown && event.key == Key.Escape) {
+                onDismissRequest()
+                true
+            } else {
+                false
+            }
+        },
+    ) {
+        EnsureOverlayWindowTransparent(window, kind = "modal")
+        ApplyBossWindowIcon(window)
+
+        // Dismiss when the modal loses focus (clicked elsewhere), matching modal expectations —
+        // but NOT when one of our own heavyweight popups took the focus.
+        //
+        // A modal can host overlays: NewTabDialog's project/folder dropdown is a ContextMenu, which
+        // under HARDWARE becomes a HeavyweightPopup, i.e. a separate always-on-top window. Opening
+        // it fires this listener, and dismissing here would close the dialog the dropdown belongs
+        // to — the user sees the whole New Tab dialog vanish when they expand the folder list. The
+        // native directory picker behind "Browse…" is the same shape.
+        DisposableEffect(window, dismissOnFocusLoss) {
+            val listener =
+                object : java.awt.event.WindowFocusListener {
+                    override fun windowGainedFocus(e: java.awt.event.WindowEvent?) = Unit
+
+                    override fun windowLostFocus(e: java.awt.event.WindowEvent?) {
+                        val dismiss =
+                            shouldDismissOnFocusLoss(
+                                dismissOnFocusLoss,
+                                OverlayConfig.openHeavyweightPopups,
+                                e?.oppositeWindow,
+                            )
+                        if (dismiss) onDismissRequest()
+                    }
+                }
+            window.addWindowFocusListener(listener)
+            onDispose { window.removeWindowFocusListener(listener) }
+        }
+        content()
+    }
+}
+
+/**
+ * Whether a heavyweight modal losing focus should actually dismiss it.
+ *
+ * Focus loss alone is not enough. Three things suppress the dismissal:
+ *
+ *  - [dismissOnFocusLoss] is false — the caller opted this modal out because focus-loss dismissal
+ *    would run a destructive action. The opt-out suppresses dismissal regardless of the other inputs.
+ *  - [openHeavyweightPopups] > 0 — one of our own heavyweight popups (a dropdown or context menu
+ *    inside the modal) is open and took the focus. Dismissing would close the dialog the popup
+ *    belongs to.
+ *  - [oppositeWindow] is a window of this application — the focus went to something else of ours,
+ *    such as a native file chooser owned by the app, rather than to another application. A null
+ *    opposite window means focus left the app entirely, which IS a real dismiss.
+ *
+ * Pure so all three conditions can be pinned by tests; the composable only supplies the inputs.
+ */
+internal fun shouldDismissOnFocusLoss(
+    dismissOnFocusLoss: Boolean,
+    openHeavyweightPopups: Int,
+    oppositeWindow: java.awt.Window?,
+): Boolean = dismissOnFocusLoss && openHeavyweightPopups <= 0 && oppositeWindow == null

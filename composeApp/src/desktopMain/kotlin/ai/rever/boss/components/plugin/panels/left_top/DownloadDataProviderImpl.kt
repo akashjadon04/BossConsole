@@ -1,0 +1,213 @@
+package ai.rever.boss.components.plugin.panels.left_top
+
+import ai.rever.boss.components.plugin.tab_types.fluck.DownloadItem
+import ai.rever.boss.components.plugin.tab_types.fluck.DownloadManager
+import ai.rever.boss.components.plugin.tab_types.fluck.DownloadStatus
+import ai.rever.boss.platform.FileSystemUtils
+import ai.rever.boss.plugin.api.DownloadDataProvider
+import ai.rever.boss.plugin.api.DownloadItemData
+import ai.rever.boss.plugin.api.DownloadStatusData
+import ai.rever.boss.plugin.browser.FluckEngine
+import ai.rever.boss.utils.logging.BossLogger
+import ai.rever.boss.utils.logging.LogCategory
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.launch
+import java.io.File
+import kotlin.coroutines.CoroutineContext
+
+private val logger = BossLogger.forComponent("DownloadDataProviderImpl")
+
+/**
+ * Engine-level download controls used by [DownloadDataProviderImpl].
+ *
+ * Every command reports whether the browser engine still owns the download:
+ * JxBrowser releases its handle as soon as a download finishes, fails or is
+ * cancelled, and a command for an id the engine no longer knows must surface as
+ * a failure rather than as a success the engine never performed.
+ */
+internal interface DownloadEngineController {
+    fun pause(id: String): Boolean
+
+    fun resume(id: String): Boolean
+
+    fun cancel(id: String): Boolean
+}
+
+/** Routes engine commands to the live JxBrowser downloads owned by FluckEngine. */
+internal object FluckDownloadEngineController : DownloadEngineController {
+    override fun pause(id: String): Boolean = FluckEngine.pauseDownload(id)
+
+    override fun resume(id: String): Boolean = FluckEngine.resumeDownload(id)
+
+    override fun cancel(id: String): Boolean = FluckEngine.cancelDownload(id)
+}
+
+/**
+ * Implementation of DownloadDataProvider that wraps FluckEngine's download management.
+ *
+ * The [downloadManager], [engine] and [collectorContext] seams exist so the
+ * command routing can be tested without starting a JxBrowser engine. They are
+ * internal; production constructs this with the public no-arg constructor.
+ */
+class DownloadDataProviderImpl internal constructor(
+    private val downloadManager: DownloadManager,
+    private val engine: DownloadEngineController,
+    collectorContext: CoroutineContext,
+) : DownloadDataProvider {
+    constructor() : this(
+        downloadManager = FluckEngine.downloadManager,
+        engine = FluckDownloadEngineController,
+        collectorContext = Dispatchers.Main,
+    )
+
+    private val scope = CoroutineScope(collectorContext + SupervisorJob())
+
+    private val _downloads = MutableStateFlow<List<DownloadItemData>>(emptyList())
+    override val downloads: StateFlow<List<DownloadItemData>> = _downloads
+
+    init {
+        // Collect from DownloadManager and map to plugin API types
+        scope.launch {
+            downloadManager.downloads.collect { items ->
+                _downloads.value = items.map { it.toData() }
+            }
+        }
+    }
+
+    override suspend fun pauseDownload(id: String): Result<Unit> = engineCommand(id, "pause") { engine.pause(id) }
+
+    override suspend fun resumeDownload(id: String): Result<Unit> = engineCommand(id, "resume") { engine.resume(id) }
+
+    override suspend fun cancelDownload(id: String): Result<Unit> = engineCommand(id, "cancel") { engine.cancel(id) }
+
+    override suspend fun removeDownload(id: String): Result<Unit> =
+        try {
+            // Read the live map, not the throttled `downloads` flow, which lags
+            // by up to a sampling window and can still be missing a download
+            // that just started.
+            val download = downloadManager.getDownload(id)
+            if (download != null && download.status == DownloadStatus.COMPLETED) {
+                // Delete the finished file if it is still there
+                val file = File(download.destinationPath)
+                if (file.exists() && !file.delete()) {
+                    logger.warn(LogCategory.FILE, "Failed to delete file", mapOf("path" to download.destinationPath))
+                }
+            } else if (download != null && !download.isTerminal) {
+                // Cancel in the engine BEFORE dropping the tracking entry. A
+                // download that is still QUEUED, DOWNLOADING or PAUSED is owned
+                // by Chromium, which keeps writing bytes to the partial file;
+                // removing only the tracking entry leaves that write untracked,
+                // unstoppable and never cleaned up.
+                if (!engine.cancel(id)) {
+                    // Usually just a race: the download reached a terminal state
+                    // between the lookup and the cancel, so the engine had
+                    // already released it. Re-read before deciding it is odd.
+                    val settled = downloadManager.getDownload(id)?.isTerminal ?: true
+                    if (settled) {
+                        logger.debug(
+                            LogCategory.BROWSER,
+                            "Download settled before the cancel reached the engine",
+                            mapOf("id" to id),
+                        )
+                    } else {
+                        logger.warn(
+                            LogCategory.BROWSER,
+                            "Engine did not accept cancel while removing an unfinished download",
+                            mapOf("id" to id, "status" to download.status.name),
+                        )
+                    }
+                }
+                // Also clean up here rather than relying only on the engine's
+                // cancel event: on a rejected cancel no event arrives at all,
+                // and a partial file deleted while Chromium still holds it
+                // either unlinks immediately or is removed by the cancel event
+                // that follows.
+                FileSystemUtils.cleanupPartialFile(download.destinationPath)
+            }
+            // Unknown ids and already FAILED/CANCELLED downloads need no engine
+            // command: the engine released them and its listener cleaned up.
+            downloadManager.removeDownload(id)
+            Result.success(Unit)
+        } catch (e: Exception) {
+            logger.warn(LogCategory.FILE, "Failed to remove download", error = e)
+            Result.failure(e)
+        }
+
+    override suspend fun clearCompleted(): Result<Unit> =
+        try {
+            // Delegates so the filtering runs against the live map instead of
+            // the throttled snapshot exposed to the UI.
+            downloadManager.clearCompleted()
+            Result.success(Unit)
+        } catch (e: Exception) {
+            logger.warn(LogCategory.FILE, "Failed to clear completed downloads", error = e)
+            Result.failure(e)
+        }
+
+    override fun revealInFolder(path: String) {
+        FileSystemUtils.revealInFolder(path)
+    }
+
+    override fun openFile(path: String) {
+        FileSystemUtils.openFile(path)
+    }
+
+    /**
+     * Issues an engine command, turning "the engine does not own this download"
+     * into a failure so the panel and the download_* MCP tools cannot report a
+     * state Chromium is not in.
+     */
+    private fun engineCommand(
+        id: String,
+        commandName: String,
+        command: () -> Boolean,
+    ): Result<Unit> =
+        try {
+            if (command()) {
+                Result.success(Unit)
+            } else {
+                logger.warn(
+                    LogCategory.BROWSER,
+                    "Engine rejected download command",
+                    mapOf("id" to id, "command" to commandName),
+                )
+                Result.failure(IllegalStateException("Download $id is not active in the browser engine"))
+            }
+        } catch (e: Exception) {
+            logger.warn(LogCategory.BROWSER, "Failed to $commandName download", error = e)
+            Result.failure(e)
+        }
+
+    // ===== Type Conversion Extension =====
+
+    private fun DownloadItem.toData(): DownloadItemData =
+        DownloadItemData(
+            id = id,
+            fileName = fileName,
+            destinationPath = destinationPath,
+            url = url,
+            status = status.toData(),
+            receivedBytes = receivedBytes,
+            totalBytes = totalBytes,
+            speed = speed,
+            canPause = canPause,
+            canResume = canResume,
+            errorReason = errorReason,
+            startTime = startedAt,
+            endTime = finishedAt,
+        )
+
+    private fun DownloadStatus.toData(): DownloadStatusData =
+        when (this) {
+            DownloadStatus.QUEUED -> DownloadStatusData.QUEUED
+            DownloadStatus.DOWNLOADING -> DownloadStatusData.DOWNLOADING
+            DownloadStatus.PAUSED -> DownloadStatusData.PAUSED
+            DownloadStatus.COMPLETED -> DownloadStatusData.COMPLETED
+            DownloadStatus.FAILED -> DownloadStatusData.FAILED
+            DownloadStatus.CANCELLED -> DownloadStatusData.CANCELLED
+        }
+}

@@ -1,0 +1,241 @@
+name: Sign a Windows MSI with DigiCert KeyLocker
+description: >
+  Signs one MSI through DigiCert Software Trust Manager and verifies the
+  signature actually landed on the file. Replaces three near-identical copies of
+  this chain in release.yml (x64 and arm64) and release-lite.yml.
+
+# Why this exists as an action rather than three copies: the copies had already
+# drifted. release-lite.yml's credential reset passed one SM_* variable where the
+# others passed four, and the arm64 copy had lost the cert-file diagnostic the
+# x64 copy kept. Every fix to the signing chain in August 2026 had to be written
+# three times, and the certsync fix that finally made signing work was one of
+# them.
+#
+# Two facts about DigiCert's tooling shape everything below, both learned the
+# expensive way:
+#
+#  - `smctl sign` exits 0 whether it signed or not. It prints
+#    "signCommand command for file <path> FAILED" and returns success, so the
+#    step's exit code is worthless and the only real check is reading the
+#    signature off the artifact. Every Windows MSI between 2026-07-21 and 9.4.24
+#    shipped unsigned under a green build for exactly this reason.
+#  - `smctl sign` shells out to signtool, which resolves the certificate from the
+#    Windows certificate store. Nothing puts it there for you, so
+#    `smctl windows certsync` has to run first.
+inputs:
+  msi-path:
+    description: Absolute path to the MSI to sign.
+    required: true
+  cert-host:
+    description: >
+      KeyLocker host (SM_HOST). Empty means "no signing credentials configured":
+      the whole chain is skipped and an unsigned MSI is reported as a warning
+      rather than an error, so forks and credential-less builds still work.
+    required: false
+    default: ''
+  api-key:
+    description: KeyLocker API key (SM_API_KEY).
+    required: false
+    default: ''
+  client-cert:
+    description: Base64-encoded PKCS#12 client authentication certificate.
+    required: false
+    default: ''
+  client-cert-password:
+    description: Password for the client authentication certificate.
+    required: false
+    default: ''
+  keypair-alias:
+    description: >
+      Alias of the signing keypair in KeyLocker. Must name a keypair the
+      credential above is authorized on: a keypair with limit_by_users set will
+      refuse every other identity, and smctl reports that refusal as the
+      thoroughly misleading "Certificate for keypair alias: ... not found".
+    required: false
+    default: ''
+  allow-unsigned:
+    description: >
+      'true' downgrades an unsigned result from a job failure to a warning. For
+      the deliberate case where signing is broken and a release has to go out
+      anyway. Anything other than 'true' keeps the gate.
+    required: false
+    default: 'false'
+  label:
+    description: Name for this artifact in log messages, e.g. "Windows ARM64".
+    required: false
+    default: Windows
+
+outputs:
+  status:
+    description: >
+      The Authenticode status read off the MSI - Valid, NotSigned, HashMismatch,
+      NotTrusted, UnknownError. Empty if the verify step did not run. Callers
+      publish this as a job output so the release body can name an installer that
+      is not signed.
+    value: ${{ steps.verify.outputs.status }}
+
+runs:
+  using: composite
+  steps:
+    # PowerShell rather than bash: every Windows runner has it natively, and this
+    # step is not gated on anything, so a shell that failed to resolve here would
+    # take the whole job with it.
+    - name: Check if signing credentials are available
+      id: check-secret
+      shell: powershell
+      env:
+        CERT_HOST: ${{ inputs.cert-host }}
+      run: |
+        if ($env:CERT_HOST) {
+          echo "can_sign=true" >> $env:GITHUB_OUTPUT
+        } else {
+          Write-Host "::warning::No KeyLocker host configured - skipping signing for ${{ inputs.label }}"
+          echo "can_sign=false" >> $env:GITHUB_OUTPUT
+        }
+
+    - name: Decode client certificate
+      if: steps.check-secret.outputs.can_sign == 'true'
+      shell: powershell
+      env:
+        CLIENT_CERT: ${{ inputs.client-cert }}
+      run: |
+        try {
+          $certBytes = [System.Convert]::FromBase64String($env:CLIENT_CERT)
+          $certPath = "${{ runner.temp }}\Certificate_pkcs12.p12"
+          [System.IO.File]::WriteAllBytes($certPath, $certBytes)
+          Write-Host "Client cert decoded to $certPath ($($certBytes.Length) bytes)"
+        } catch {
+          Write-Host "::error::Could not decode the client authentication certificate: $_"
+          exit 1
+        }
+
+    - name: Verify client cert file exists
+      if: steps.check-secret.outputs.can_sign == 'true'
+      shell: powershell
+      run: |
+        $certPath = "${{ runner.temp }}\Certificate_pkcs12.p12"
+        if (Test-Path $certPath) {
+          Write-Host "[OK] Cert file exists at $certPath, $((Get-Item $certPath).Length) bytes"
+        } else {
+          Write-Host "::error::Cert file MISSING at $certPath"
+          exit 1
+        }
+
+    - name: Install DigiCert STM client tools
+      if: steps.check-secret.outputs.can_sign == 'true'
+      uses: digicert/ssm-code-signing@v1.2.1
+      env:
+        SM_HOST: ${{ inputs.cert-host }}
+        SM_API_KEY: ${{ inputs.api-key }}
+        SM_CLIENT_CERT_FILE: ${{ runner.temp }}\Certificate_pkcs12.p12
+        SM_CLIENT_CERT_PASSWORD: ${{ inputs.client-cert-password }}
+
+    # Credentials go in through the environment, not the command line. cmd would
+    # mis-parse a password containing & ^ | or a space, and it would fail looking
+    # exactly like a KeyLocker outage.
+    - name: Reset SMCTL credentials
+      if: steps.check-secret.outputs.can_sign == 'true'
+      shell: cmd
+      env:
+        SM_HOST: ${{ inputs.cert-host }}
+        SM_API_KEY: ${{ inputs.api-key }}
+        SM_CLIENT_CERT_FILE: ${{ runner.temp }}\Certificate_pkcs12.p12
+        SM_CLIENT_CERT_PASSWORD: ${{ inputs.client-cert-password }}
+      run: |
+        smctl credentials delete
+        smctl credentials save "%SM_API_KEY%" "%SM_CLIENT_CERT_PASSWORD%"
+
+    # certsync is the precondition; the other three are diagnostics, because
+    # smctl gives no reason for a signing failure. Between them they say whether
+    # the credential, the KSP registration or the keypair alias is at fault,
+    # rather than costing a release run to find out.
+    #
+    # This step must never fail the job: the authoritative verdict is the verify
+    # step reading the file, and a certsync failure should still let the sign
+    # attempt happen and be judged there. Composite actions do not support
+    # continue-on-error on their steps, so the script says so itself with a
+    # trailing `exit /b 0` - which is arguably the better place for the intent.
+    - name: Sync KeyLocker certificate to the Windows store
+      if: steps.check-secret.outputs.can_sign == 'true'
+      shell: cmd
+      env:
+        SM_HOST: ${{ inputs.cert-host }}
+        SM_API_KEY: ${{ inputs.api-key }}
+        SM_CLIENT_CERT_FILE: ${{ runner.temp }}\Certificate_pkcs12.p12
+        SM_CLIENT_CERT_PASSWORD: ${{ inputs.client-cert-password }}
+        KEYPAIR_ALIAS: ${{ inputs.keypair-alias }}
+      run: |
+        smctl healthcheck
+        smctl windows ksp list
+        smctl keypair ls
+        smctl windows certsync --keypair-alias="%KEYPAIR_ALIAS%"
+        exit /b 0
+
+    - name: Sign the MSI
+      if: steps.check-secret.outputs.can_sign == 'true'
+      shell: bash
+      env:
+        SM_HOST: ${{ inputs.cert-host }}
+        SM_API_KEY: ${{ inputs.api-key }}
+        SM_CLIENT_CERT_FILE: ${{ runner.temp }}\Certificate_pkcs12.p12
+        SM_CLIENT_CERT_PASSWORD: ${{ inputs.client-cert-password }}
+        KEYPAIR_ALIAS: ${{ inputs.keypair-alias }}
+        MSI_PATH: ${{ inputs.msi-path }}
+      run: |
+        echo "Signing ${{ inputs.label }} MSI: $MSI_PATH"
+        smctl sign --keypair-alias "$KEYPAIR_ALIAS" --input "$MSI_PATH"
+
+    - name: Check SMKSP log
+      if: always() && steps.check-secret.outputs.can_sign == 'true'
+      shell: powershell
+      run: |
+        $logPath = "$env:USERPROFILE\.signingmanager\logs\smksp.log"
+        if (Test-Path $logPath) {
+          Write-Host "SMKSP log, last 50 lines:"
+          Get-Content $logPath -Tail 50
+        } else {
+          # Normal when the failure happened before the KSP was ever loaded.
+          Write-Host "SMKSP log not found."
+        }
+
+    # The only authoritative check in this action, and the one that caught the
+    # month of unsigned releases. Everything above can report success while the
+    # file carries no signature.
+    - name: Verify MSI signature
+      id: verify
+      shell: powershell
+      env:
+        MSI_PATH: ${{ inputs.msi-path }}
+        ALLOW_UNSIGNED: ${{ inputs.allow-unsigned }}
+        CAN_SIGN: ${{ steps.check-secret.outputs.can_sign }}
+        LABEL: ${{ inputs.label }}
+      run: |
+        $sig = Get-AuthenticodeSignature -FilePath $env:MSI_PATH
+        Write-Host "Signature status: $($sig.Status)"
+        if ($sig.SignerCertificate) {
+          Write-Host "Signer: $($sig.SignerCertificate.Subject)"
+        }
+        echo "status=$($sig.Status)" >> $env:GITHUB_OUTPUT
+
+        if ($sig.Status -eq 'Valid') { exit 0 }
+
+        if ($env:CAN_SIGN -ne 'true') {
+          Write-Host "::warning::$($env:LABEL) MSI is UNSIGNED, status $($sig.Status) (no signing credentials configured)"
+          exit 0
+        }
+
+        if ($sig.Status -eq 'NotSigned' -or $sig.Status -eq 'HashMismatch') {
+          # Credentials were present and smctl exited 0, yet no usable signature
+          # is on the file. This is the silent case worth blocking a release over.
+          if ($env:ALLOW_UNSIGNED -eq 'true') {
+            Write-Host "::warning::Signature enforcement overridden: publishing a $($sig.Status) $($env:LABEL) MSI because allow_unsigned_windows was set"
+            exit 0
+          }
+          Write-Host "::error::$($env:LABEL) MSI signature is $($sig.Status) even though signing credentials were present"
+          Write-Host "::error::Read the 'Sync KeyLocker certificate to the Windows store' step above for why. To ship this release anyway, re-run with allow_unsigned_windows enabled."
+          exit 1
+        }
+
+        # NotTrusted / UnknownError and friends: the signature may be fine and
+        # the runner's trust store or parser may not be. Loud, but not fatal.
+        Write-Host "::warning::$($env:LABEL) MSI signature status is $($sig.Status), expected Valid"

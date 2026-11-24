@@ -1,0 +1,103 @@
+name: 🔏 Windows Signing Smoke Test
+
+# Exercises .github/actions/sign-windows-msi end to end against a throwaway
+# binary, in about two minutes and without building or releasing anything.
+#
+# It exists because the signing chain failed silently for a month. `smctl sign`
+# exits 0 whether it signed or not, so the only way to know the chain works is to
+# read the signature off a file afterwards - and until now the only place that
+# happened was a real release, which needs the `release` environment and is
+# restricted to main. That made every change to the signing chain unverifiable
+# before merge, which is how a missing certsync survived from 2026-07-21 to 9.4.24.
+#
+# Deliberately NOT triggered on every pull request: each run consumes one
+# signature from the KeyLocker allocation. Path-filtered to the action itself,
+# plus manual dispatch.
+on:
+  pull_request:
+    paths:
+      - '.github/actions/sign-windows-msi/**'
+      - '.github/workflows/sign-action-smoke.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sign-a-throwaway-binary:
+    runs-on: windows-latest
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v7
+
+      # Compile our own trivial PE rather than copying a system binary, so the
+      # thing being signed is unambiguously ours and starts out unsigned - which
+      # is what makes the signer assertion below meaningful.
+      - name: 🔨 Build a throwaway binary to sign
+        id: target
+        shell: powershell
+        run: |
+          $csc = "$env:SystemRoot\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+          if (-not (Test-Path $csc)) {
+            Write-Host "::error::csc.exe not found at $csc - cannot build a test binary"
+            exit 1
+          }
+          $src = "$env:RUNNER_TEMP\SmokeTarget.cs"
+          $out = "$env:RUNNER_TEMP\SmokeTarget.exe"
+          Set-Content -Path $src -Value 'class P { static void Main() { System.Console.WriteLine("smoke"); } }'
+          & $csc /nologo /out:$out $src
+          if (-not (Test-Path $out)) {
+            Write-Host "::error::compilation produced no binary"
+            exit 1
+          }
+
+          # Must start unsigned, or a passing test would prove nothing.
+          $before = (Get-AuthenticodeSignature -FilePath $out).Status
+          Write-Host "Built $out, signature before signing: $before"
+          if ($before -ne 'NotSigned') {
+            Write-Host "::error::test binary is already signed ($before) - the assertion below would be vacuous"
+            exit 1
+          }
+          echo "path=$out" >> $env:GITHUB_OUTPUT
+
+      - name: 🔏 Sign it through the shared action
+        id: sign
+        uses: ./.github/actions/sign-windows-msi
+        with:
+          msi-path: ${{ steps.target.outputs.path }}
+          cert-host: ${{ secrets.CODE_SIGNING_CERT_HOST }}
+          api-key: ${{ secrets.CODE_SIGNING_CERT_HOST_API_KEY }}
+          client-cert: ${{ secrets.CODE_SIGNING_CLIENT_CERT }}
+          client-cert-password: ${{ secrets.CODE_SIGNING_CLIENT_CERT_PASSWORD }}
+          keypair-alias: ${{ secrets.CODE_SIGNING_KEYPAIR_ALIAS }}
+          label: smoke test
+
+      # The action's own verify step already fails on NotSigned. This asserts the
+      # two things it cannot: that the status reached the caller as an output, and
+      # that OUR certificate did the signing rather than something pre-existing.
+      - name: ✅ Assert the action signed it with our certificate
+        shell: powershell
+        env:
+          REPORTED: ${{ steps.sign.outputs.status }}
+          TARGET: ${{ steps.target.outputs.path }}
+        run: |
+          Write-Host "Action reported status: '$env:REPORTED'"
+          if ($env:REPORTED -ne 'Valid') {
+            Write-Host "::error::action output status was '$env:REPORTED', expected Valid"
+            exit 1
+          }
+
+          $sig = Get-AuthenticodeSignature -FilePath $env:TARGET
+          $subject = if ($sig.SignerCertificate) { $sig.SignerCertificate.Subject } else { '<none>' }
+          Write-Host "On-disk status: $($sig.Status)"
+          Write-Host "Signer: $subject"
+
+          if ($sig.Status -ne 'Valid') {
+            Write-Host "::error::on-disk signature is $($sig.Status) despite the action reporting Valid"
+            exit 1
+          }
+          if ($subject -notmatch 'Akash Jadon') {
+            Write-Host "::error::signed by '$subject', which is not our certificate"
+            exit 1
+          }
+          Write-Host "Signing chain verified end to end."

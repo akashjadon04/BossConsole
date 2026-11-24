@@ -1,0 +1,392 @@
+package ai.rever.boss.components.bars.horizontal
+
+import ai.rever.boss.components.bars.ChromeBar
+import ai.rever.boss.components.bars.getBarScrollbarConfig
+import ai.rever.boss.components.bars.horizontalScrollWithScrollbar
+import ai.rever.boss.components.bars.rememberBarContextMenuItems
+import ai.rever.boss.components.buttons.BossActionButton
+import ai.rever.boss.components.dialogs.McpPolicyManagerDialog
+import ai.rever.boss.components.dialogs.McpProviderTrustDialog
+import ai.rever.boss.components.events.PanelEventBus
+import ai.rever.boss.components.overlays.contextMenu
+import ai.rever.boss.components.plugin.registries.StatusBarRegistryImpl
+import ai.rever.boss.components.plugin.registries.owningPluginId
+import ai.rever.boss.components.plugin.tab_types.fluck.FluckTabInfo
+import ai.rever.boss.components.window_panel.components.main_window_panels.BossTabsComponent
+import ai.rever.boss.layout.BossChrome
+import ai.rever.boss.mcp.McpPolicyAction
+import ai.rever.boss.mcp.McpToolPolicyConfig
+import ai.rever.boss.mcp.McpToolRegistryImpl
+import ai.rever.boss.performance.PerformanceState
+import ai.rever.boss.plugin.api.PanelId
+import ai.rever.boss.plugin.api.StatusBarAlignment
+import ai.rever.boss.plugin.sandbox.ui.PluginExtensionBoundary
+import ai.rever.boss.plugin.tab.codeeditor.EditorTabInfo
+import ai.rever.boss.plugin.tab.terminal.TerminalTabInfo
+import ai.rever.boss.plugin.ui.BossTheme
+import ai.rever.boss.utils.SystemUtils
+import ai.rever.boss.window.LocalWindowId
+import ai.rever.boss.window.LocalWindowProjectState
+import ai.rever.boss.window.Project
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.material.Divider
+import androidx.compose.material.Icon
+import androidx.compose.material.Text
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
+import androidx.compose.material.icons.outlined.Info
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.arkivanov.decompose.extensions.compose.subscribeAsState
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+@Composable
+fun BossBottomBar(tabsComponent: BossTabsComponent? = null) {
+    Divider(color = BossTheme.colors.line, thickness = BossChrome.dimens.dividerThickness)
+    HorizontalBar(
+        modifier = Modifier.contextMenu(items = rememberBarContextMenuItems(ChromeBar.BOTTOM)),
+        height = BossChrome.dimens.bottomBarHeight,
+    ) {
+        HorizontalBarRow {
+            BossLeftBottomBar(tabsComponent)
+            PluginStatusBarItems(StatusBarAlignment.LEFT)
+            Spacer(modifier = Modifier.weight(0.1f))
+            PluginStatusBarItems(StatusBarAlignment.RIGHT)
+            BossRightBottomBar()
+        }
+    }
+}
+
+/**
+ * Plugin-contributed status-bar widgets (StatusBarRegistry) for one alignment
+ * group. Each widget renders inside a [PluginExtensionBoundary]: a crash
+ * attributed to the owning plugin collapses that widget to a compact error
+ * marker instead of corrupting the status bar (or, for a plugin with no
+ * other boundary, escalating to the app-level CrashHandler).
+ */
+@Composable
+private fun PluginStatusBarItems(alignment: StatusBarAlignment) {
+    val items by StatusBarRegistryImpl.items.collectAsState()
+    val access by StatusBarRegistryImpl.access.collectAsState()
+    val visible =
+        remember(items, access, alignment) {
+            StatusBarRegistryImpl.visibleItems(alignment)
+        }
+    visible.forEach { provider ->
+        key(provider.itemId) {
+            PluginExtensionBoundary(
+                pluginId = owningPluginId(provider),
+                surface = "status item ${provider.itemId}",
+            ) {
+                provider.Content()
+            }
+        }
+    }
+}
+
+@Composable
+fun RightArrow() {
+    Icon(
+        imageVector = Icons.AutoMirrored.Outlined.KeyboardArrowRight,
+        modifier = Modifier.size(18.dp),
+        contentDescription = "Right Arrow",
+        tint = BossTheme.colors.textSecondary,
+    )
+}
+
+@Composable
+fun RowScope.BossLeftBottomBar(tabsComponent: BossTabsComponent? = null) {
+    Column(modifier = Modifier.weight(2f).padding(horizontal = 8.dp)) {
+        Row(
+            modifier =
+                Modifier
+                    .horizontalScrollWithScrollbar(
+                        rememberScrollState(),
+                        scrollbarConfig = getBarScrollbarConfig(),
+                    ),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            // Collect state once at the top level to avoid multiple subscriptions (per-window)
+            val windowProjectState = LocalWindowProjectState.current
+            val currentProject by windowProjectState?.selectedProject?.collectAsState()
+                ?: remember { mutableStateOf(Project("No Project", "", 0L)) }
+
+            if (tabsComponent != null) {
+                val tabsState by tabsComponent.tabsState.subscribeAsState()
+                val activeTab = tabsState.activeTab
+
+                when (activeTab) {
+                    is EditorTabInfo -> {
+                        // Show file path from project root
+                        val projectRoot =
+                            currentProject.path.let {
+                                if (it.endsWith("/")) it else "$it/"
+                            }
+                        val relativePath = activeTab.filePath.removePrefix(projectRoot)
+                        val pathParts = relativePath.split("/")
+
+                        pathParts.forEachIndexed { index, part ->
+                            if (part.isNotEmpty()) {
+                                BossActionButton(
+                                    text = part,
+                                    color = BossTheme.colors.textSecondary,
+                                    onClick = {},
+                                )
+                                if (index < pathParts.lastIndex && pathParts[index + 1].isNotEmpty()) {
+                                    RightArrow()
+                                }
+                            }
+                        }
+                    }
+
+                    is FluckTabInfo -> {
+                        // Show current URL
+                        Text(
+                            text = activeTab.currentUrl,
+                            color = BossTheme.colors.textSecondary,
+                            fontSize = 12.sp,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(horizontal = 4.dp),
+                        )
+                    }
+
+                    is TerminalTabInfo -> {
+                        // Show terminal title (e.g., "user@hostname:/path")
+                        Text(
+                            text = activeTab.title,
+                            color = BossTheme.colors.textSecondary,
+                            fontSize = 12.sp,
+                            modifier = Modifier.padding(horizontal = 4.dp),
+                        )
+                    }
+
+                    null -> {
+                        // Explicitly handle null case (no tab active)
+                        Text(
+                            text = "${currentProject.name} | Ready",
+                            color = BossTheme.colors.textSecondary,
+                            fontSize = 12.sp,
+                            modifier = Modifier.padding(horizontal = 4.dp),
+                        )
+                    }
+
+                    else -> {
+                        // Handle unknown tab types
+                        Text(
+                            text = "${currentProject.name} | ${activeTab.title}",
+                            color = BossTheme.colors.textSecondary,
+                            fontSize = 12.sp,
+                            modifier = Modifier.padding(horizontal = 4.dp),
+                        )
+                    }
+                }
+            } else {
+                // Show minimal content if no tabs component (shouldn't happen in normal use)
+                Text(
+                    text = "Ready",
+                    color = BossTheme.colors.textSecondary,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(horizontal = 4.dp),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+@Suppress("LongMethod") // Declarative Compose layout.
+fun BossRightBottomBar() {
+    val windowId = LocalWindowId.current
+    val scope = rememberCoroutineScope()
+
+    // MCP kill-switch degraded state. Persistent on purpose: this is the only
+    // access control an admin user does not bypass, and while it is showing, some
+    // or all agent tools are being withheld. A transient status message cannot
+    // carry that — the next message cancels it, and one raised during startup is
+    // gone before the window is up (BossConsole#85).
+    val killSwitchFault by McpToolRegistryImpl.killSwitchFault.collectAsState()
+    killSwitchFault?.let { fault ->
+        Text(
+            text = "⚠ ${fault.message}",
+            color = BossTheme.colors.alert,
+            fontSize = 12.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.widthIn(max = 560.dp).padding(horizontal = 8.dp),
+        )
+    }
+
+    val trustedTools by McpToolRegistryImpl.policyEngine.sessionTrustedTools.collectAsState()
+    if (trustedTools.isNotEmpty()) {
+        androidx.compose.material.TextButton(onClick = { McpToolRegistryImpl.policyEngine.clearSessionTrusts() }) {
+            Text("Revoke MCP session trust (${trustedTools.size})", color = BossTheme.colors.alert)
+        }
+    }
+
+    // Inspection/revocation for a rule saved via the approval dialog's "Always Allow"/"Always
+    // Deny" - the gap AGENTS.md's governance section names as reachable only by hand-editing
+    // ~/.boss/mcp-tool-policy.json and restarting.
+    val persistedPolicyConfig by McpToolRegistryImpl.policyEngine.config.collectAsState()
+    var showPolicyManager by remember { mutableStateOf(false) }
+    if (persistedPolicyConfig.rules.isNotEmpty()) {
+        androidx.compose.material.TextButton(onClick = { showPolicyManager = true }) {
+            Text(
+                "Persisted MCP policies (${persistedPolicyConfig.rules.size})",
+                color = BossTheme.colors.textSecondary,
+            )
+        }
+    }
+    if (showPolicyManager) {
+        McpPolicyManagerDialog(
+            rules = persistedPolicyConfig.rules,
+            // Dispatchers.IO: revokePersistedPolicy does a synchronized atomicWriteText disk
+            // write, and setToolPolicy already made the equivalent invocation-path write take
+            // this same dispatcher (McpToolRegistryImpl) - this call site was the one still
+            // running it on the UI thread, where a click could block behind another write
+            // holding the same lock from a slow, networked or AV-scanned home directory.
+            onRevoke = { toolName ->
+                withContext(Dispatchers.IO) {
+                    McpToolRegistryImpl.policyEngine.revokePersistedPolicy(toolName)
+                }
+            },
+            onDismiss = { showPolicyManager = false },
+        )
+    }
+
+    // "Trust This Plugin" grants from the approval dialog - a persisted, provider-wide ALLOW,
+    // listed and revoked individually (see the controls below) from the same config the
+    // persisted-policy manager above reads.
+    McpProviderTrustControls(persistedPolicyConfig)
+
+    val policyFault by McpToolRegistryImpl.policyFault.collectAsState()
+    policyFault?.let { fault ->
+        Text(
+            text = "⚠ ${fault.message}",
+            color = BossTheme.colors.alert,
+            fontSize = 12.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.widthIn(max = 560.dp).padding(horizontal = 8.dp),
+        )
+    }
+
+    // Governed Autonomy telemetry: show last executed tool, duration, and status
+    val recentOps by McpToolRegistryImpl.ledger.recentOperations.collectAsState()
+    recentOps.firstOrNull()?.let { lastOp ->
+        val statusSymbol = if (lastOp.isError) "✕" else "✓"
+        val statusColor = if (lastOp.isError) BossTheme.colors.alert else BossTheme.colors.textSecondary
+        Text(
+            text = "MCP: ${lastOp.toolName} (${lastOp.durationMs}ms) $statusSymbol",
+            color = statusColor,
+            fontSize = 11.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(horizontal = 6.dp),
+        )
+    }
+
+    // Status message (temporary messages like "Workspace Saved")
+    val statusMessage by StatusMessageManager.currentMessage.collectAsState()
+    statusMessage?.let { message ->
+        Text(
+            text = message,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            color = BossTheme.colors.ok, // Green color for success
+            fontSize = 12.sp,
+            modifier = Modifier.widthIn(max = 560.dp).padding(horizontal = 8.dp),
+        )
+    }
+
+    // Live download/update progress, and the way into the download dialog. Ahead of
+    // the performance indicator so a transfer sits next to the plugin status items
+    // it used to be one of, rather than at the far edge of the bar.
+    DownloadCenterStatusItem()
+
+    // Performance indicator (shows memory/CPU usage)
+    val showIndicator = PerformanceState.shouldShowIndicator()
+    if (showIndicator) {
+        val snapshot = PerformanceState.currentSnapshot()
+        val health = PerformanceState.currentHealth()
+        // Resolved here rather than in the sampler because it is per window: this strip should
+        // show the browser in THIS window, and a single sampled value would show one window's tab
+        // in the other's.
+        //
+        // Keyed on the snapshot, which arrives every `memorySampleIntervalMs` - 1 s by default,
+        // not the 15 s of ProcessFootprint.MEASURE_TTL_MS. Those are two different clocks: this
+        // re-reads about once a second, while the value behind it only changes every 15 s. The
+        // key is there to keep it off the recomposition path, not to match the sampler.
+        val activeBrowserBytes =
+            remember(snapshot, windowId) {
+                windowId?.let { PerformanceState.activeBrowserBytes(it) } ?: 0L
+            }
+        PerformanceIndicator(
+            snapshot = snapshot,
+            health = health,
+            activeBrowserBytes = activeBrowserBytes,
+            onClick = { PerformanceState.togglePerformancePanel() },
+        )
+    }
+
+    BossActionButton(
+        imageVector = Icons.Outlined.Info,
+        text = "Console",
+        color = BossTheme.colors.textSecondary,
+        onClick = {
+            // Toggle Console panel (PanelId "console" with order 14)
+            windowId?.let { wid ->
+                scope.launch {
+                    PanelEventBus.togglePanel(PanelId("console", 14), sourceWindowId = wid)
+                }
+            }
+        },
+    )
+}
+
+/**
+ * The "Trusted plugins" control for the provider-wide ALLOWs ("Trust This Plugin") granted
+ * from the approval dialog.
+ *
+ * Behind a button that only appears once a rule exists, same as session trust in
+ * [BossRightBottomBar]; unlike session trust this is a list-and-revoke-individually dialog
+ * rather than a single clear-all, since these are durable grants an operator made
+ * deliberately, potentially several at once.
+ */
+@Composable
+private fun McpProviderTrustControls(config: McpToolPolicyConfig) {
+    var showTrustedPluginsDialog by remember { mutableStateOf(false) }
+    val trustedProviderCount = config.providerRules.count { it.value == McpPolicyAction.ALLOW }
+    if (trustedProviderCount > 0) {
+        androidx.compose.material.TextButton(onClick = { showTrustedPluginsDialog = true }) {
+            Text("Trusted plugins ($trustedProviderCount)", color = BossTheme.colors.textSecondary)
+        }
+    }
+    if (showTrustedPluginsDialog) {
+        McpProviderTrustDialog(
+            providerRules = config.providerRules,
+            // Dispatchers.IO: revokeProviderPolicy performs the same synchronized atomicWriteText
+            // disk write as revokePersistedPolicy, off the UI thread for the same reason.
+            onRevoke = { providerId ->
+                withContext(Dispatchers.IO) {
+                    McpToolRegistryImpl.policyEngine.revokeProviderPolicy(providerId)
+                }
+            },
+            onDismiss = { showTrustedPluginsDialog = false },
+        )
+    }
+}

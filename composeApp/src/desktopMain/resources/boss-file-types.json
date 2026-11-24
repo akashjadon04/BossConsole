@@ -1,0 +1,621 @@
+{
+  "$comment": [
+    "Single source of truth for the file types and URL schemes BOSS can be made the default handler for.",
+    "Read by three consumers and pinned by one test:",
+    "  1. buildSrc/BossFileTypes generates the macOS CFBundleDocumentTypes and UTExportedTypeDeclarations blocks from it at build time.",
+    "  2. FileTypeCategories (runtime) serves the Settings screen and the registration calls.",
+    "  3. WindowsFileAssociations / LinuxFileAssociations derive ProgIDs and MIME associations from it.",
+    "  BossFileTypesTest asserts the ext set and the ext-to-language map here equal EditorLanguages.EXTENSIONS,",
+    "  so what BOSS claims to open cannot drift from what its editor can actually highlight.",
+    "",
+    "systemType: the macOS UTI this extension resolves to, claimed as-is. Measured with UTType(filenameExtension:)",
+    "  on macOS 26, not guessed; absent means the extension has no system UTI (UTType reports a dyn.* placeholder),",
+    "  so BOSS exports its own type for it, grouped by language.",
+    "rejectedSystemType: the extension DOES resolve to a system UTI, and BOSS deliberately does not claim it.",
+    "  .ts resolves to public.mpeg-2-transport-stream (a video container), .as to com.apple.applesingle-archive",
+    "  (a binary archive) and .edn to com.adobe.edn (an Adobe project format). Claiming any of them would make",
+    "  BOSS the default application for a format it cannot open, so those three get an exported type instead.",
+    "  This is the reason the table records a measurement per extension rather than a rule: nothing about the",
+    "  extension itself tells you that .ts is video to Launch Services.",
+    "",
+    "exportedTypePrefix / exportedTypeSuffix build the UTIs BOSS owns: '<prefix>.<language><suffix>'.",
+    "  Here rather than in code because the generator (buildSrc) and the app (FileTypeCategories) must produce",
+    "  byte-identical identifiers - the app asks Launch Services about the very types the plist declared.",
+    "  Changing either value orphans every default a user has already set, so treat them as frozen."
+  ],
+  "exportedTypePrefix": "ai.rever.boss",
+  "exportedTypeSuffix": "-source",
+  "categories": [
+    {
+      "id": "web-links",
+      "displayName": "Web links",
+      "description": "http and https links from other apps",
+      "schemes": [
+        "http",
+        "https"
+      ],
+      "extraContentTypes": [],
+      "mimeTypes": [
+        "x-scheme-handler/http",
+        "x-scheme-handler/https"
+      ],
+      "systemTypeRank": "Alternate"
+    },
+    {
+      "id": "web-pages",
+      "displayName": "Web pages",
+      "description": "Local .html files and saved web locations",
+      "schemes": [],
+      "extraContentTypes": [
+        "public.url"
+      ],
+      "mimeTypes": [
+        "text/html",
+        "application/xhtml+xml"
+      ],
+      "systemTypeRank": "Alternate"
+    },
+    {
+      "id": "markdown",
+      "displayName": "Markdown",
+      "description": "README and .md files, with preview",
+      "schemes": [],
+      "extraContentTypes": [],
+      "mimeTypes": [
+        "text/markdown"
+      ],
+      "systemTypeRank": "Default"
+    },
+    {
+      "id": "shell-scripts",
+      "displayName": "Shell scripts",
+      "description": "Opens .sh, .bash and .zsh files in the editor; never runs them",
+      "schemes": [],
+      "extraContentTypes": [],
+      "mimeTypes": [
+        "application/x-shellscript",
+        "text/x-shellscript"
+      ],
+      "systemTypeRank": "Default"
+    },
+    {
+      "id": "source-code",
+      "displayName": "Source code and config",
+      "description": "Every language the BOSS editor can highlight",
+      "schemes": [],
+      "extraContentTypes": [],
+      "mimeTypes": [
+        "text/x-python",
+        "text/x-csrc",
+        "text/x-chdr",
+        "text/x-c++src",
+        "text/x-c++hdr",
+        "text/x-java-source",
+        "application/javascript",
+        "application/json",
+        "text/xml",
+        "text/css",
+        "text/x-ruby",
+        "application/x-php",
+        "text/x-perl",
+        "text/x-lua",
+        "text/x-go",
+        "text/x-scala",
+        "text/x-sql",
+        "text/x-makefile",
+        "text/x-diff",
+        "text/x-fortran",
+        "text/x-pascal",
+        "application/toml",
+        "application/x-yaml"
+      ],
+      "systemTypeRank": "Default"
+    }
+  ],
+  "languageNames": {
+    "kotlin": "Kotlin",
+    "java": "Java",
+    "javascript": "JavaScript",
+    "typescript": "TypeScript",
+    "python": "Python",
+    "json": "JSON",
+    "xml": "XML",
+    "html": "HTML",
+    "css": "CSS",
+    "markdown": "Markdown",
+    "toml": "TOML",
+    "groovy": "Gradle",
+    "swift": "Swift",
+    "c": "C",
+    "cpp": "C++",
+    "csharp": "C#",
+    "rust": "Rust",
+    "go": "Go",
+    "ruby": "Ruby",
+    "php": "PHP",
+    "perl": "Perl",
+    "lua": "Lua",
+    "bash": "Shell",
+    "yaml": "YAML",
+    "sql": "SQL",
+    "r": "R",
+    "scala": "Scala",
+    "dockerfile": "Dockerfile",
+    "makefile": "Makefile",
+    "properties": "Properties",
+    "diff": "Diff",
+    "batch": "Batch",
+    "clojure": "Clojure",
+    "latex": "LaTeX",
+    "lisp": "Lisp",
+    "tcl": "Tcl",
+    "fortran": "Fortran",
+    "d": "D",
+    "delphi": "Delphi",
+    "visualbasic": "Visual Basic",
+    "actionscript": "ActionScript",
+    "jsp": "JSP"
+  },
+  "extensions": [
+    {
+      "ext": "kt",
+      "language": "kotlin",
+      "category": "source-code"
+    },
+    {
+      "ext": "kts",
+      "language": "kotlin",
+      "category": "source-code"
+    },
+    {
+      "ext": "java",
+      "language": "java",
+      "category": "source-code",
+      "systemType": "com.sun.java-source"
+    },
+    {
+      "ext": "js",
+      "language": "javascript",
+      "category": "source-code",
+      "systemType": "com.netscape.javascript-source"
+    },
+    {
+      "ext": "jsx",
+      "language": "javascript",
+      "category": "source-code"
+    },
+    {
+      "ext": "mjs",
+      "language": "javascript",
+      "category": "source-code",
+      "systemType": "com.netscape.javascript-source"
+    },
+    {
+      "ext": "cjs",
+      "language": "javascript",
+      "category": "source-code"
+    },
+    {
+      "ext": "ts",
+      "language": "typescript",
+      "category": "source-code",
+      "rejectedSystemType": "public.mpeg-2-transport-stream"
+    },
+    {
+      "ext": "tsx",
+      "language": "typescript",
+      "category": "source-code",
+      "systemType": "com.microsoft.typescript"
+    },
+    {
+      "ext": "py",
+      "language": "python",
+      "category": "source-code",
+      "systemType": "public.python-script"
+    },
+    {
+      "ext": "pyw",
+      "language": "python",
+      "category": "source-code"
+    },
+    {
+      "ext": "json",
+      "language": "json",
+      "category": "source-code",
+      "systemType": "public.json"
+    },
+    {
+      "ext": "xml",
+      "language": "xml",
+      "category": "source-code",
+      "systemType": "public.xml"
+    },
+    {
+      "ext": "html",
+      "language": "html",
+      "category": "web-pages",
+      "systemType": "public.html"
+    },
+    {
+      "ext": "htm",
+      "language": "html",
+      "category": "web-pages",
+      "systemType": "public.html"
+    },
+    {
+      "ext": "css",
+      "language": "css",
+      "category": "source-code",
+      "systemType": "public.css"
+    },
+    {
+      "ext": "scss",
+      "language": "css",
+      "category": "source-code"
+    },
+    {
+      "ext": "sass",
+      "language": "css",
+      "category": "source-code"
+    },
+    {
+      "ext": "md",
+      "language": "markdown",
+      "category": "markdown",
+      "systemType": "net.daringfireball.markdown"
+    },
+    {
+      "ext": "markdown",
+      "language": "markdown",
+      "category": "markdown",
+      "systemType": "net.daringfireball.markdown"
+    },
+    {
+      "ext": "toml",
+      "language": "toml",
+      "category": "source-code",
+      "systemType": "public.toml"
+    },
+    {
+      "ext": "gradle",
+      "language": "groovy",
+      "category": "source-code"
+    },
+    {
+      "ext": "swift",
+      "language": "swift",
+      "category": "source-code",
+      "systemType": "public.swift-source"
+    },
+    {
+      "ext": "c",
+      "language": "c",
+      "category": "source-code",
+      "systemType": "public.c-source"
+    },
+    {
+      "ext": "h",
+      "language": "c",
+      "category": "source-code",
+      "systemType": "public.c-header"
+    },
+    {
+      "ext": "cpp",
+      "language": "cpp",
+      "category": "source-code",
+      "systemType": "public.c-plus-plus-source"
+    },
+    {
+      "ext": "cc",
+      "language": "cpp",
+      "category": "source-code",
+      "systemType": "public.c-plus-plus-source"
+    },
+    {
+      "ext": "cxx",
+      "language": "cpp",
+      "category": "source-code",
+      "systemType": "public.c-plus-plus-source"
+    },
+    {
+      "ext": "hpp",
+      "language": "cpp",
+      "category": "source-code",
+      "systemType": "public.c-plus-plus-header"
+    },
+    {
+      "ext": "cs",
+      "language": "csharp",
+      "category": "source-code"
+    },
+    {
+      "ext": "rs",
+      "language": "rust",
+      "category": "source-code"
+    },
+    {
+      "ext": "go",
+      "language": "go",
+      "category": "source-code"
+    },
+    {
+      "ext": "rb",
+      "language": "ruby",
+      "category": "source-code",
+      "systemType": "public.ruby-script"
+    },
+    {
+      "ext": "php",
+      "language": "php",
+      "category": "source-code",
+      "systemType": "public.php-script"
+    },
+    {
+      "ext": "pl",
+      "language": "perl",
+      "category": "source-code",
+      "systemType": "public.perl-script"
+    },
+    {
+      "ext": "pm",
+      "language": "perl",
+      "category": "source-code",
+      "systemType": "public.perl-script"
+    },
+    {
+      "ext": "lua",
+      "language": "lua",
+      "category": "source-code"
+    },
+    {
+      "ext": "sh",
+      "language": "bash",
+      "category": "shell-scripts",
+      "systemType": "public.shell-script"
+    },
+    {
+      "ext": "bash",
+      "language": "bash",
+      "category": "shell-scripts",
+      "systemType": "public.bash-script"
+    },
+    {
+      "ext": "zsh",
+      "language": "bash",
+      "category": "shell-scripts",
+      "systemType": "public.zsh-script"
+    },
+    {
+      "ext": "yml",
+      "language": "yaml",
+      "category": "source-code",
+      "systemType": "public.yaml"
+    },
+    {
+      "ext": "yaml",
+      "language": "yaml",
+      "category": "source-code",
+      "systemType": "public.yaml"
+    },
+    {
+      "ext": "sql",
+      "language": "sql",
+      "category": "source-code",
+      "systemType": "org.iso.sql"
+    },
+    {
+      "ext": "r",
+      "language": "r",
+      "category": "source-code",
+      "systemType": "com.apple.rez-source"
+    },
+    {
+      "ext": "scala",
+      "language": "scala",
+      "category": "source-code"
+    },
+    {
+      "ext": "dockerfile",
+      "language": "dockerfile",
+      "category": "source-code"
+    },
+    {
+      "ext": "mk",
+      "language": "makefile",
+      "category": "source-code",
+      "systemType": "public.make-source"
+    },
+    {
+      "ext": "mak",
+      "language": "makefile",
+      "category": "source-code",
+      "systemType": "public.make-source"
+    },
+    {
+      "ext": "properties",
+      "language": "properties",
+      "category": "source-code"
+    },
+    {
+      "ext": "ini",
+      "language": "properties",
+      "category": "source-code",
+      "systemType": "com.microsoft.ini"
+    },
+    {
+      "ext": "cfg",
+      "language": "properties",
+      "category": "source-code",
+      "systemType": "public.toml"
+    },
+    {
+      "ext": "env",
+      "language": "properties",
+      "category": "source-code"
+    },
+    {
+      "ext": "diff",
+      "language": "diff",
+      "category": "source-code",
+      "systemType": "public.patch-file"
+    },
+    {
+      "ext": "patch",
+      "language": "diff",
+      "category": "source-code",
+      "systemType": "public.patch-file"
+    },
+    {
+      "ext": "bat",
+      "language": "batch",
+      "category": "source-code"
+    },
+    {
+      "ext": "cmd",
+      "language": "batch",
+      "category": "source-code"
+    },
+    {
+      "ext": "clj",
+      "language": "clojure",
+      "category": "source-code"
+    },
+    {
+      "ext": "cljs",
+      "language": "clojure",
+      "category": "source-code"
+    },
+    {
+      "ext": "cljc",
+      "language": "clojure",
+      "category": "source-code"
+    },
+    {
+      "ext": "edn",
+      "language": "clojure",
+      "category": "source-code",
+      "rejectedSystemType": "com.adobe.edn"
+    },
+    {
+      "ext": "tex",
+      "language": "latex",
+      "category": "source-code"
+    },
+    {
+      "ext": "sty",
+      "language": "latex",
+      "category": "source-code"
+    },
+    {
+      "ext": "cls",
+      "language": "latex",
+      "category": "source-code"
+    },
+    {
+      "ext": "bib",
+      "language": "latex",
+      "category": "source-code"
+    },
+    {
+      "ext": "lisp",
+      "language": "lisp",
+      "category": "source-code"
+    },
+    {
+      "ext": "lsp",
+      "language": "lisp",
+      "category": "source-code"
+    },
+    {
+      "ext": "el",
+      "language": "lisp",
+      "category": "source-code"
+    },
+    {
+      "ext": "scm",
+      "language": "lisp",
+      "category": "source-code"
+    },
+    {
+      "ext": "tcl",
+      "language": "tcl",
+      "category": "source-code"
+    },
+    {
+      "ext": "f",
+      "language": "fortran",
+      "category": "source-code",
+      "systemType": "public.fortran-source"
+    },
+    {
+      "ext": "f90",
+      "language": "fortran",
+      "category": "source-code",
+      "systemType": "public.fortran-90-source"
+    },
+    {
+      "ext": "f95",
+      "language": "fortran",
+      "category": "source-code",
+      "systemType": "public.fortran-95-source"
+    },
+    {
+      "ext": "f03",
+      "language": "fortran",
+      "category": "source-code"
+    },
+    {
+      "ext": "for",
+      "language": "fortran",
+      "category": "source-code",
+      "systemType": "public.fortran-source"
+    },
+    {
+      "ext": "d",
+      "language": "d",
+      "category": "source-code"
+    },
+    {
+      "ext": "pas",
+      "language": "delphi",
+      "category": "source-code",
+      "systemType": "public.pascal-source"
+    },
+    {
+      "ext": "dpr",
+      "language": "delphi",
+      "category": "source-code"
+    },
+    {
+      "ext": "dfm",
+      "language": "delphi",
+      "category": "source-code"
+    },
+    {
+      "ext": "vb",
+      "language": "visualbasic",
+      "category": "source-code"
+    },
+    {
+      "ext": "vbs",
+      "language": "visualbasic",
+      "category": "source-code"
+    },
+    {
+      "ext": "as",
+      "language": "actionscript",
+      "category": "source-code",
+      "rejectedSystemType": "com.apple.applesingle-archive"
+    },
+    {
+      "ext": "jsp",
+      "language": "jsp",
+      "category": "source-code"
+    },
+    {
+      "ext": "jspx",
+      "language": "jsp",
+      "category": "source-code"
+    }
+  ]
+}

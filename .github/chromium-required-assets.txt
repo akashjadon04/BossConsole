@@ -1,0 +1,5 @@
+boss-chromium-macos-arm64.zip
+boss-chromium-macos-x64.zip
+boss-chromium-windows-x64.zip
+boss-chromium-linux-x64.zip
+boss-chromium-linux-arm64.zip

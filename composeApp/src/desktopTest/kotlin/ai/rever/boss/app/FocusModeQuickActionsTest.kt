@@ -1,0 +1,262 @@
+package ai.rever.boss.app
+
+import ai.rever.boss.components.overlays.OverlayConfig
+import ai.rever.boss.components.overlays.resetOverlayFieldForTest
+import ai.rever.boss.plugin.ui.LocalHeavyweightOverlays
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalWindowInfo
+import androidx.compose.ui.platform.WindowInfo
+import androidx.compose.ui.test.SemanticsNodeInteraction
+import androidx.compose.ui.test.assertCountEquals
+import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.DpSize
+import androidx.compose.ui.unit.dp
+import org.junit.After
+import org.junit.Rule
+import org.junit.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
+
+/**
+ * Pins the two guards on [FocusModeQuickActions], and the identity its sign-out hint carries.
+ *
+ * Both guards are one line and nothing else in the build would notice either going missing - but on
+ * the heavyweight path this composable opens a non-focusable always-on-top AWT window, and the JVM
+ * has no portable click-through. One composed while the top bar is showing is a dead click region
+ * over live content; one left up while BOSS is in the background is a dead click region over
+ * whatever the user switched to. `ToastOverlayTest` pins the same two lines in the toast overlay for
+ * the same reasons.
+ */
+class FocusModeQuickActionsTest {
+    @get:Rule
+    val rule = createComposeRule()
+
+    private val previousRenderer = OverlayConfig.heavyweightCorner
+    private val previousUseHeavyweight = OverlayConfig.useHeavyweightPopups
+
+    /** What the fake renderer was handed, so the wiring can be asserted and not just assumed. */
+    private var receivedInset: DpSize? = null
+
+    @After
+    fun restore() {
+        // OverlayConfig is a process-global registry; leaving a fake in it would leak into any
+        // other test that routes an overlay.
+        OverlayConfig.heavyweightCorner = previousRenderer
+        resetOverlayFieldForTest("useHeavyweightOverlays")
+        OverlayConfig.useHeavyweightPopups = previousUseHeavyweight
+    }
+
+    private class FakeWindowInfo(
+        override val isWindowFocused: Boolean,
+    ) : WindowInfo
+
+    /**
+     * Mount the cluster and report whether the heavyweight renderer was asked for a window.
+     *
+     * Presence, not a count: a tally would count COMPOSITIONS, so any extra recomposition would
+     * break an equality assertion without anything being wrong.
+     */
+    private fun windowRequestedFor(
+        visible: Boolean,
+        focused: Boolean = true,
+        heavyweight: Boolean = true,
+        inset: DpSize = DpSize.Zero,
+    ): Boolean {
+        var requested = false
+        resetOverlayFieldForTest("useHeavyweightOverlays")
+        OverlayConfig.useHeavyweightPopups = heavyweight
+        OverlayConfig.heavyweightCorner = { _, _, cornerInset, _, _, _ ->
+            // Recorded, not composed: composing a real Window needs a display.
+            requested = true
+            receivedInset = cornerInset
+        }
+        rule.setContent {
+            CompositionLocalProvider(
+                LocalHeavyweightOverlays provides heavyweight,
+                LocalWindowInfo provides FakeWindowInfo(focused),
+            ) {
+                Box(modifier = Modifier.fillMaxSize()) {
+                    FocusModeQuickActions(
+                        visible = visible,
+                        inset = { inset },
+                        onShowSettings = {},
+                        onShowSearch = {},
+                        onSignOut = {},
+                    )
+                }
+            }
+        }
+        rule.waitForIdle()
+        return requested
+    }
+
+    @Test
+    fun `nothing is composed while the top bar is showing`() {
+        assertFalse(windowRequestedFor(visible = false))
+        rule.onAllNodesWithTag(FOCUS_QUICK_ACTIONS_TAG).assertCountEquals(0)
+    }
+
+    @Test
+    fun `the cluster appears once the top bar is hidden`() {
+        assertTrue(windowRequestedFor(visible = true))
+    }
+
+    @Test
+    fun `the measured inset reaches the renderer, with the margin folded in`() {
+        // The whole design rests on this one argument, and two plausible regressions would leave
+        // every other test in the suite green: OverlayCorner forwarding DpSize.Zero (easy, since
+        // the parameter has a default) or this composable passing zero instead of its own inset.
+        // Either puts the cluster back over the right sidebar and the status bar, which is exactly
+        // what the parameter exists to prevent.
+        //
+        // The margin is part of the assertion, not an offset to look past. It rides in the inset
+        // rather than as padding on the surface precisely because padding inside the overlay window
+        // would be transparent and still swallow clicks, right on the corner where a resize handle
+        // and a scrollbar corner live. Moving it back into the content would restore that dead band
+        // and change nothing else observable.
+        val measured = DpSize(56.dp, 24.dp)
+
+        windowRequestedFor(visible = true, inset = measured)
+
+        assertEquals(DpSize(56.dp + QUICK_ACTIONS_MARGIN, 24.dp + QUICK_ACTIONS_MARGIN), receivedInset)
+    }
+
+    @Test
+    fun `no overlay window is opened while the parent window is unfocused`() {
+        assertFalse(
+            windowRequestedFor(visible = true, focused = false),
+            "the overlay is always-on-top over every other application, so one held open while " +
+                "BOSS is in the background is a dead click region in whatever the user switched to",
+        )
+    }
+
+    @Test
+    fun `the lightweight path draws in place and keeps its corner margin`() {
+        // The path a BOSS_RENDERING_MODE=OFF_SCREEN user gets, and the one no test covered:
+        // `heavyweight` defaulted to true everywhere, so "focused, lightweight" was never composed.
+        // That gap hid a real bug - OverlayCorner's lightweight branch ignores `inset`, so folding
+        // the margin into the inset unconditionally dropped it here and put the cluster flush in
+        // the corner, 8dp from where the unfocused branch puts it.
+        assertFalse(
+            windowRequestedFor(visible = true, heavyweight = false),
+            "no overlay window should be asked for when the corner is routed lightweight",
+        )
+        rule.onAllNodesWithTag(FOCUS_QUICK_ACTIONS_TAG).assertCountEquals(1)
+        assertEquals(
+            QUICK_ACTIONS_MARGIN,
+            marginOf(rule.onNodeWithTag(FOCUS_QUICK_ACTIONS_TAG)),
+            "the margin has to survive the path that ignores the inset",
+        )
+    }
+
+    @Test
+    fun `the content fits inside the overlay's clip ceiling`() {
+        // QUICK_ACTIONS_OVERLAY_SIZE is a hard clip on the heavyweight path, not a first guess, and
+        // exceeding it loses part of a button with nothing logged and every other test still green.
+        // Bumping space.xs, growing the icon button or adding a fourth action would all do it.
+        //
+        // Measured on the lightweight path because that is where the real content lays out; its
+        // margin is padding on the same node, so it comes back off before the comparison.
+        windowRequestedFor(visible = true, heavyweight = false)
+        val outer = sizeOf(rule.onNodeWithTag(FOCUS_QUICK_ACTIONS_TAG))
+        val content = DpSize(outer.width - QUICK_ACTIONS_MARGIN * 2, outer.height - QUICK_ACTIONS_MARGIN * 2)
+
+        // Three actions, so the ceiling that applies is the one without the launcher. Checking
+        // against the wider four-button bound would pass while the overlay this case actually
+        // creates clipped a button.
+        val ceiling = QUICK_ACTIONS_OVERLAY_SIZE
+        assertTrue(
+            content.width <= ceiling.width && content.height <= ceiling.height,
+            "content is $content but the ceiling that clips it is $ceiling",
+        )
+    }
+
+    /** The tagged surface's own size, margin included. */
+    private fun sizeOf(node: SemanticsNodeInteraction): DpSize {
+        val bounds = node.fetchSemanticsNode().boundsInRoot
+        return with(rule.density) { DpSize(bounds.width.toDp(), bounds.height.toDp()) }
+    }
+
+    /**
+     * The gap between the tagged surface and the bottom-right of its parent, which is what the
+     * margin actually buys. Read from the layout rather than from the modifier, because the bug
+     * this catches was a modifier that was present and doing nothing.
+     */
+    private fun marginOf(node: SemanticsNodeInteraction): Dp {
+        val bounds = node.fetchSemanticsNode().boundsInRoot
+        val root = node.fetchSemanticsNode().root!!.let { it.semanticsOwner.rootSemanticsNode.boundsInRoot }
+        val density = rule.density
+        return with(density) { (root.bottom - bounds.bottom).toDp() }
+    }
+
+    @Test
+    fun `an unfocused window still draws the cluster in place`() {
+        // Falling back rather than vanishing: the cluster is part of the chrome while the top bar
+        // is cleared, and disappearing whenever the window loses focus would read as a bug.
+        windowRequestedFor(visible = true, focused = false)
+
+        rule.onAllNodesWithTag(FOCUS_QUICK_ACTIONS_TAG).assertCountEquals(1)
+    }
+
+    @Test
+    fun `each button reaches its own callback`() {
+        // Reachability of these three is the entire point of the feature, and nothing pinned it:
+        // swapping Search and Settings inside QuickActions, or wiring Sign Out to onShowSettings,
+        // left every other test in this suite green. Mirrors BossTopRightBarTest, which exists for
+        // the same reason on the other copy of these buttons.
+        //
+        // On the lightweight path, so the real content is composed rather than handed to a fake
+        // renderer. The buttons are icon-only, so `text` is the content description.
+        val fired = mutableListOf<String>()
+        resetOverlayFieldForTest("useHeavyweightOverlays")
+        OverlayConfig.useHeavyweightPopups = false
+        rule.setContent {
+            CompositionLocalProvider(
+                LocalHeavyweightOverlays provides false,
+                LocalWindowInfo provides FakeWindowInfo(isWindowFocused = true),
+            ) {
+                Box(modifier = Modifier.fillMaxSize()) {
+                    FocusModeQuickActions(
+                        visible = true,
+                        inset = { DpSize.Zero },
+                        onShowSettings = { fired += "settings" },
+                        onShowSearch = { fired += "search" },
+                        onSignOut = { fired += "signOut" },
+                    )
+                }
+            }
+        }
+
+        rule.onNodeWithContentDescription("Settings").performClick()
+        rule.onNodeWithContentDescription("Search").performClick()
+        rule.onNodeWithContentDescription("Sign Out").performClick()
+        rule.waitForIdle()
+
+        assertEquals(listOf("settings", "search", "signOut"), fired)
+    }
+
+    @Test
+    fun `the sign-out hint names the signed-in account`() {
+        // The cluster is icon-only, so the hint is the only place the address the top bar prints
+        // next to this button still appears - and which account is about to be signed out is worth
+        // confirming before the click, not after.
+        assertEquals("Sign out - operator@example.com", signOutHint("operator@example.com"))
+    }
+
+    @Test
+    fun `the sign-out hint falls back when there is no account`() {
+        assertEquals("Sign out of your account", signOutHint(null))
+        // Blank is not an identity. An empty string reaching the hint would render "Sign out - "
+        // and read as a truncation bug rather than as a signed-out state.
+        assertEquals("Sign out of your account", signOutHint("   "))
+    }
+}

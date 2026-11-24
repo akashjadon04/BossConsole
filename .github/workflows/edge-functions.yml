@@ -1,0 +1,128 @@
+name: ⚡ Edge Functions
+
+# Gates the Supabase Edge Functions, which no other workflow touches.
+# Scoped to supabase/functions so it stays a fast PR check (no Gradle, no JDK).
+#
+# The passkey function carries the server-side WebAuthn verification: the signed
+# challenge comparison, rpIdHash matching, signature-counter rule and the
+# base64/base64url decoding. Two of its e2e tests had silently rotted before this
+# job existed, which is the argument for having it.
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'supabase/functions/**'
+      # The function's behaviour is coupled to the passkey migrations (columns,
+      # the session_id index, the RPC grant), so schema edits run these too
+      - 'supabase/migrations/**'
+      - '.github/workflows/edge-functions.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'supabase/functions/**'
+      - 'supabase/migrations/**'
+      - '.github/workflows/edge-functions.yml'
+  workflow_dispatch:
+
+jobs:
+  passkey:
+    name: 🔐 Passkey function — check & test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: supabase/functions/passkey
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: 🦕 Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: 🔎 Type check
+        # -print0/-0 so paths with spaces survive, and -r so an empty result is a
+        # no-op rather than a vacuous pass over the whole directory
+        run: find . -name '*.ts' -print0 | sort -z | xargs -0 -r deno check
+
+      - name: 🧪 Tests
+        # --allow-all: the suite reads/sets env vars (PASSKEY_RP_ID, JWT_SECRET)
+        # and resolves the same remote dependencies the function itself uses.
+        run: deno test --allow-all
+
+      - name: 🧹 Lint (advisory)
+        # Not gating: the existing files carry pre-existing lint findings
+        # (inline jsr: specifiers in tests, require-await in utils/html.ts).
+        # continue-on-error rather than `|| true`, so a regression is visible in
+        # the checks UI instead of disappearing into a green step.
+        continue-on-error: true
+        run: deno lint
+
+  plugin-store:
+    name: 🧩 Plugin Store function — check & test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: supabase/functions/plugin-store
+    # The passkey job's working-directory means `find . -name '*.ts'` and
+    # `deno test` never leave supabase/functions/passkey, so nothing was running
+    # this function's suite. That matters most for tests/auth-permissions.test.ts:
+    # its wiring guards exist because deleting `requiredPermission` from one of
+    # the five publish handlers leaves every behavioural test green AND
+    # type-checking, so a guard that only runs on a laptop guards nothing.
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: 🦕 Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: 🔎 Type check
+        run: find . -name '*.ts' -print0 | sort -z | xargs -0 -r deno check
+
+      - name: 🧪 Tests
+        # --allow-read: the wiring guards read routes/*.ts to assert every publish
+        # handler still passes requiredPermission and renders auth.status.
+        run: deno test --allow-all
+
+      - name: 🧹 Lint (advisory)
+        continue-on-error: true
+        run: deno lint
+
+  organisation:
+    name: 🏛️ Organisation function — check & test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: supabase/functions/organisation
+    # Each function gets its own job because `working-directory` scopes both the
+    # `find` and the `deno test` -- adding this function's directory to an
+    # existing job would not have run it. That is exactly how the plugin-store
+    # suite sat unexecuted (see the note on that job).
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v7
+
+      - name: 🦕 Setup Deno
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+
+      - name: 🔎 Type check
+        run: find . -name '*.ts' -print0 | sort -z | xargs -0 -r deno check
+
+      - name: 🧪 Tests
+        # --allow-env: the suite sets ORG_SESSION_SECRET and ORG_PUBLIC_BASE_PATH
+        # to exercise the fail-closed path and the cookie Path.
+        # --allow-net: resolving the remote hono / supabase-js dependencies.
+        # --allow-read: the duplicate-class guard scans views/ on disk, because the
+        # previous version only inspected one rendered page and missed two files.
+        run: deno test --allow-env --allow-net --allow-read
+
+      - name: 🧹 Lint
+        # Gating, unlike the two jobs above: this function is new, so it starts
+        # with no findings to grandfather. Keep it that way.
+        run: deno lint

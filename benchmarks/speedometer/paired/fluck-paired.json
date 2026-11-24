@@ -1,0 +1,23 @@
+{
+  "browser": "BOSS fluck browser",
+  "host": "BOSS 9.2.63",
+  "benchmark": "Speedometer 3.1",
+  "url": "https://browserbench.org/Speedometer3.1/?startAutomatically=1&iterationCount=10",
+  "iterationCount": 10,
+  "method": "MCP browser_run_js, alternated back-to-back with Comet (see PAIRED.md)",
+  "viewport": { "w": 1432, "h": 729, "dpr": 2 },
+  "visibilityProtocol": "document.hidden verified false immediately before each run. Completion time used as the throttling cross-check: a throttled run cannot finish 580 steps in ~20-40s (the observed throttled run managed 11/580 in 40s).",
+  "runs": [
+    { "pair": 1, "score": 46.5, "scoreExact": 46.46933314389025, "confidenceText": "± 2.0", "valid": true, "hiddenAtReadTime": true, "note": "went hidden after completion; run itself finished within the window" },
+    { "pair": 2, "score": 46.95, "confidenceText": null, "valid": true, "hiddenAtReadTime": true, "note": "completed in ~22s, far faster than any throttled run" },
+    { "pair": 3, "score": 48.3, "scoreExact": 48.3365983522677, "confidenceText": "± 0.56", "geomeanMs": 20.693288019383218, "valid": true, "hiddenAtReadTime": false }
+  ],
+  "median": 46.95,
+  "pairedComparison": {
+    "cometScores": [44.7, 46.1, 45.4],
+    "fluckScores": [46.5, 46.95, 48.3],
+    "fluckMarginPercent": [4.0, 1.8, 6.4],
+    "medianMarginPercent": 3.4,
+    "conclusion": "fluck ahead in 3/3 pairs, but the margin is the same size as each browser's own run-to-run spread. Indistinguishable at this precision; the ordering is not established."
+  }
+}

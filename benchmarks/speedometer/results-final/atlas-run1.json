@@ -1,0 +1,15 @@
+{
+  "browser": "ChatGPT Atlas",
+  "benchmark": "Speedometer 3.1",
+  "url": "https://browserbench.org/Speedometer3.1/?startAutomatically=1&iterationCount=10",
+  "iterationCount": 10,
+  "method": "screenshot",
+  "score": 34.8,
+  "confidenceText": "\u00b1 1.2",
+  "screenshot": "results-final/cropped/atlas-run1.png",
+  "recordedAt": "2026-07-31T03:47:19.477Z",
+  "elapsedSeconds": 30,
+  "valid": null,
+  "scoreSource": "transcribed from screenshot (no automation endpoint available)",
+  "validNote": "unknown: the committed crop does not include Speedometer's validity banner. Viewport cleared the 850x650 minimum and no warning was visible in the full capture at transcription time."
+}
